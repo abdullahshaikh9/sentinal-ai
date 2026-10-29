@@ -1,0 +1,69 @@
+# Python Bytecode and Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python Virtual Environments
+.venv/
+.venv*/
+venv/
+env/
+ENV/
+
+# Local Environment and Secret Files (Strictly excluded)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# Private Keys, Certificates, and Credentials
+*.pem
+*.key
+*.pfx
+*.p12
+*.cert
+
+# Node.js, Frontend Dependencies, and Build Artifacts
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo
+
+# Application and Runtime Logs
+*.log
+debug.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local SQLite / Temporary Database Files
+*.db
+*.sqlite3
+
+# Local Scratch, Verification Deliverables, and Temporary Artifacts
+scratch/
+backend/scratch/
+temp/
+tmp/
+
+# Operating System and IDE Configuration
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Generated test results
+.vitest-results.json
