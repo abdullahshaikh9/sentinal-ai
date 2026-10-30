@@ -539,6 +539,21 @@ class AdminDatabaseDiagnosticsRead(BaseModel):
     expected_head: str
     revision_state: str
     error_category: str | None = None
+    database_identity: dict[str, object] = Field(default_factory=dict)
+    tls: dict[str, bool] = Field(default_factory=dict)
+    current_revisions: list[str] = Field(default_factory=list)
+    row_counts: dict[str, int] = Field(default_factory=dict)
+    schema_compatible: bool | None = None
+    schema_issues: list[str] = Field(default_factory=list)
+
+
+class AdminDiagnosticChallengeRead(BaseModel):
+    challenge: str
+    expires_in_seconds: int
+
+
+class AdminDiagnosticExecuteRequest(BaseModel):
+    challenge: str = Field(min_length=32, max_length=256)
 
 
 class AdminUserStatusUpdate(BaseModel):

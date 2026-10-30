@@ -14,6 +14,7 @@ Set these backend environment values in production:
 - `TRUSTED_PROXY_HOSTS=<proxy-ip-or-cidr>` when TLS terminates at a proxy. It defaults to loopback and rejects wildcard or non-IP entries in production.
 - `DATABASE_URL=<existing MySQL connection URL>` and apply the reviewed Alembic head during the controlled migration window.
 - `DATABASE_SSL_CA_PATH=<absolute path to a readable CA PEM file>` for TiDB Cloud. The application passes this to PyMySQL with both certificate and hostname verification enabled; TiDB Cloud hostnames are rejected at startup unless this value is set.
+- `DATABASE_CONNECT_TIMEOUT_SECONDS=10` bounds MySQL/TiDB connect, read, and write waits; keep it between 1 and 60.
 - `AUTH_COOKIE_SECURE` may be omitted; production forces Secure cookies. Explicitly setting it to `false` prevents production startup.
 
 The Procfile and Nixpacks start phase run only Uvicorn; they never run migrations.
@@ -39,6 +40,52 @@ and run `migrate` only once from a controlled runtime job. These commands
 reject unexpected host, port, database, or TiDB TLS settings and never print
 credentials. `migrate` uses a database advisory lock and refuses unexpected
 Alembic revisions; it is not an image-build command.
+
+## Temporary read-only diagnostic endpoint
+
+The HTTP diagnostic flow is disabled by default. To enable it temporarily in
+EthioDeploy, set `ADMIN_DIAGNOSTICS_ENABLED=true` and provide a high-entropy
+`ADMIN_DIAGNOSTIC_SECRET` of at least 32 characters through protected runtime
+environment variables. Do not put this secret in the frontend, URL, source
+code, or logs. The administrator must authenticate and pass CSRF validation,
+then make these two POST requests from a controlled client:
+
+```text
+POST /api/v1/admin/database-diagnostics/challenge
+X-Sentinel-Diagnostic-Secret: <protected secret>
+X-CSRF-Token: <authenticated session CSRF token>
+
+POST /api/v1/admin/database-diagnostics
+X-CSRF-Token: <authenticated session CSRF token>
+{"challenge":"<one-time challenge response>"}
+```
+
+The challenge is single-use, expires after `ADMIN_DIAGNOSTIC_CHALLENGE_TTL_SECONDS`
+(default 60), and is rate-limited by client address using
+`ADMIN_DIAGNOSTIC_RATE_LIMIT` (default 5 attempts per 15 minutes). The response
+contains only database identity metadata, TLS verification flags, revisions,
+table existence, row counts, and schema issue categories. Disable the feature
+again immediately after diagnosis.
+
+## Local-to-TiDB import workflow
+
+The import utility is dry-run first and rejects unexpected targets, missing
+TLS verification, missing backups, non-empty destinations, revision mismatch,
+schema issues, duplicate/conflicting state, and orphaned relationships:
+
+```text
+python -m app.production_import plan --confirm-production-target --backup-path <protected-backup-path> --backup-sha256 <backup-sha256>
+python -m app.production_import import --confirm-production-target --backup-path <protected-backup-path> --backup-sha256 <backup-sha256> --execute --confirm-import
+```
+
+`IMPORT_SOURCE_DATABASE_URL` must be provided only to the controlled import
+runtime and is never printed. The default import excludes sessions, OTP
+challenges, password-reset challenges, OTP send attempts, and temporary login
+attempts because importing active or expired authentication state requires a
+separate security review. It preserves primary keys, timestamps, ownership,
+and application records for the explicitly listed import tables. The import
+uses batches and a database advisory lock; it never runs automatically at web
+startup or during image construction.
 
 If TLS terminates at a reverse proxy, configure `TRUSTED_PROXY_HOSTS` with only
 the proxy's actual source IP address(es) or CIDR ranges. The default trusts only

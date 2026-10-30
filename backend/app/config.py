@@ -3,7 +3,7 @@ import ipaddress
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     database_url: str = "sqlite:///./sentinel.db"
     database_ssl_ca_path: str | None = None
+    database_connect_timeout_seconds: int = Field(default=10, ge=1, le=60)
     api_v1_prefix: str = "/api/v1"
     allowed_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
     trusted_proxy_hosts: str = "127.0.0.1,::1"
@@ -52,6 +53,10 @@ class Settings(BaseSettings):
     textbee_enabled: bool = False
     textbee_api_key: str | None = None
     admin_user_ids: str = ""
+    admin_diagnostics_enabled: bool = False
+    admin_diagnostic_secret: str | None = None
+    admin_diagnostic_challenge_ttl_seconds: int = Field(default=60, ge=10, le=300)
+    admin_diagnostic_rate_limit: int = Field(default=5, ge=1, le=100)
 
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -85,6 +90,8 @@ class Settings(BaseSettings):
         database_host = (urlsplit(self.database_url).hostname or "").lower()
         if database_host.endswith(".tidbcloud.com") and not self.database_ssl_ca_path:
             raise ValueError("DATABASE_SSL_CA_PATH is required for TiDB Cloud connections.")
+        if self.admin_diagnostics_enabled and (not self.admin_diagnostic_secret or len(self.admin_diagnostic_secret) < 32):
+            raise ValueError("ADMIN_DIAGNOSTIC_SECRET must contain at least 32 characters when diagnostics are enabled.")
         if self.app_env.lower() != "production":
             return self
         if self.auth_cookie_secure is False:
@@ -115,16 +122,21 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
 
     @property
-    def database_connect_args(self) -> dict[str, bool | str]:
+    def database_connect_args(self) -> dict[str, bool | str | int]:
         if self.database_url.startswith("sqlite"):
             return {"check_same_thread": False}
+        connect_args: dict[str, bool | str | int] = {
+            "connect_timeout": self.database_connect_timeout_seconds,
+            "read_timeout": self.database_connect_timeout_seconds,
+            "write_timeout": self.database_connect_timeout_seconds,
+        }
         if self.database_ssl_ca_path:
-            return {
+            connect_args.update({
                 "ssl_ca": self.database_ssl_ca_path,
                 "ssl_verify_cert": True,
                 "ssl_verify_identity": True,
-            }
-        return {}
+            })
+        return connect_args
 
     @property
     def secure_auth_cookies(self) -> bool:

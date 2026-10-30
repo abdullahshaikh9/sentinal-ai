@@ -57,6 +57,8 @@ def platform_client(monkeypatch):
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[routes.get_current_user] = lambda: owner
     app.dependency_overrides[routes.require_csrf] = lambda: None
+    app.dependency_overrides[routes.require_admin_read_only] = lambda: owner
+    app.dependency_overrides[routes.require_csrf_read_only] = lambda: None
     try:
         with TestClient(app) as client:
             yield client, factory, owner
@@ -374,9 +376,14 @@ def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(pla
     from app.config import Settings
 
     client, _, admin = platform_client
-    monkeypatch.setattr(routes, "get_settings", lambda: Settings(_env_file=None, admin_user_ids=str(admin.id)))
+    monkeypatch.setattr(routes, "get_settings", lambda: Settings(_env_file=None, admin_user_ids=str(admin.id), admin_diagnostics_enabled=True, admin_diagnostic_secret="diagnostic-secret-for-tests-32-chars"))
 
-    response = client.get("/api/v1/admin/database-diagnostics")
+    challenge = client.post(
+        "/api/v1/admin/database-diagnostics/challenge",
+        headers={"X-Sentinel-Diagnostic-Secret": "diagnostic-secret-for-tests-32-chars"},
+    )
+    assert challenge.status_code == 200
+    response = client.post("/api/v1/admin/database-diagnostics", json={"challenge": challenge.json()["challenge"]})
 
     assert response.status_code == 200
     data = response.json()
@@ -388,6 +395,17 @@ def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(pla
     assert data["required_tables"]["report_metadata"] is True
     assert data["expected_head"] == "20261030_0010"
     assert data["revision_state"] == "missing_revision_table"
+    assert data["row_counts"]["users"] == 1
+    assert data["database_identity"]["engine"] == "sqlite"
+    assert data["tls"]["certificate_verification"] is False
+
+    replay = client.post("/api/v1/admin/database-diagnostics", json={"challenge": challenge.json()["challenge"]})
+    assert replay.status_code == 404
+
+
+def test_admin_database_diagnostics_is_disabled_by_default(platform_client):
+    client, _, _ = platform_client
+    assert client.post("/api/v1/admin/database-diagnostics/challenge").status_code == 404
 
 
 def test_all_admin_routes_deny_authenticated_non_allowlisted_accounts(platform_client, monkeypatch):
@@ -398,7 +416,6 @@ def test_all_admin_routes_deny_authenticated_non_allowlisted_accounts(platform_c
     read_paths = [
         "/api/v1/admin/overview",
         "/api/v1/admin/health",
-        "/api/v1/admin/database-diagnostics",
         "/api/v1/admin/users",
         "/api/v1/admin/assets",
         "/api/v1/admin/findings",

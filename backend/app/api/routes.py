@@ -7,23 +7,25 @@ import io
 from collections import defaultdict
 from datetime import UTC, date as Date, datetime, time, timedelta
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy import and_, case, func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.db import DatabaseUnavailableError, check_database_connection, database_error_category, get_db
 from app.models import ActivityEvent, Asset, AuthSession, Finding, FindingRemediation, LoginAttempt, Notification, OtpChallenge, PasswordResetChallenge, RemediationChange, ReportMetadata, Scan, User, VerificationAttempt
-from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminDatabaseDiagnosticsRead, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
+from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminDatabaseDiagnosticsRead, AdminDiagnosticChallengeRead, AdminDiagnosticExecuteRequest, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
 from app.services.activity import record_event
 from app.services.ai import AIProviderError, AIRateLimitError, MAX_CONTEXT_FINDINGS, assistant_http_error, ask_provider, build_context, check_rate_limit, configuration_message, provider_context_budget, provider_is_configured, provider_name
 from app.services.guidance import build_defensive_guidance
-from app.services.auth import clear_auth_cookies, clear_login_failures, create_session, finalize_login_attempt, get_current_user, hash_password, normalize_email, require_csrf, reserve_login_attempt, set_auth_cookies, verify_password
+from app.services.auth import clear_auth_cookies, clear_login_failures, create_session, finalize_login_attempt, get_current_user, get_current_user_read_only, hash_password, normalize_email, require_csrf, require_csrf_read_only, reserve_login_attempt, set_auth_cookies, verify_password
 from app.services.otp import OtpSendRateLimitError, check_send_cooldown, check_send_rate_limits, configuration_message as otp_configuration_message, create_challenge, create_password_reset_challenge, deliver, deliver_password_reset_otp, email_provider_configured, get_challenge, log_delivery_failure, normalize_phone, providers_configured, record_send_attempts, sms_provider_configured, verify_code, verify_password_reset_code
 from app.services.reports import build_scan_pdf
 from app.services.scanning.jobs import execute_scan
 from app.services.verification import execute_verification
+from app.services.diagnostic_access import diagnostic_challenges
+from app.production_db_ops import collect_diagnostic_report
 
 router = APIRouter()
 assistant_logger = logging.getLogger("sentinel.assistant")
@@ -38,6 +40,10 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.id not in _administrator_ids():
         raise HTTPException(status_code=403, detail="Administrator access is required.")
     return user
+
+
+def require_admin_read_only(user: User = Depends(get_current_user_read_only)) -> User:
+    return require_admin(user)
 
 
 def _user_read(user: User) -> UserRead:
@@ -853,59 +859,64 @@ def admin_health(db: Session = Depends(get_db), _admin: User = Depends(require_a
     )
 
 
-@router.get("/admin/database-diagnostics", response_model=AdminDatabaseDiagnosticsRead, tags=["admin"])
-def admin_database_diagnostics(db: Session = Depends(get_db), _admin: User = Depends(require_admin)) -> AdminDatabaseDiagnosticsRead:
-    """Read-only database and migration diagnostics for administrators."""
-    expected_head = "20261030_0010"
-    required_table_names = (
-        "scans",
-        "findings",
-        "verification_attempts",
-        "report_metadata",
-        "assets",
-        "activity_events",
-        "users",
-        "auth_sessions",
-        "otp_challenges",
-        "otp_send_attempts",
-        "password_reset_challenges",
-        "login_attempts",
-        "login_rate_limit_mutex",
-        "finding_remediation",
-        "remediation_changes",
-        "notifications",
-        "alembic_version",
+def _diagnostic_client_key(request: Request) -> str:
+    return hashlib.sha256((request.client.host if request.client else "unknown").encode()).hexdigest()
+
+
+def _require_diagnostics_enabled() -> Settings:
+    settings = get_settings()
+    if not settings.admin_diagnostics_enabled or not settings.admin_diagnostic_secret:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return settings
+
+
+@router.post("/admin/database-diagnostics/challenge", response_model=AdminDiagnosticChallengeRead, tags=["admin"])
+def issue_admin_database_diagnostic_challenge(
+    request: Request,
+    x_sentinel_diagnostic_secret: str | None = Header(default=None),
+    _admin: User = Depends(require_admin_read_only),
+    _csrf: AuthSession = Depends(require_csrf_read_only),
+) -> AdminDiagnosticChallengeRead:
+    settings = _require_diagnostics_enabled()
+    challenge = diagnostic_challenges.issue(
+        _diagnostic_client_key(request),
+        x_sentinel_diagnostic_secret or "",
+        settings.admin_diagnostic_secret or "",
+        settings.admin_diagnostic_challenge_ttl_seconds,
+        settings.admin_diagnostic_rate_limit,
     )
+    if challenge is None:
+        raise HTTPException(status_code=404, detail="Not found.")
+    return AdminDiagnosticChallengeRead(challenge=challenge, expires_in_seconds=settings.admin_diagnostic_challenge_ttl_seconds)
+
+
+@router.post("/admin/database-diagnostics", response_model=AdminDatabaseDiagnosticsRead, tags=["admin"])
+def admin_database_diagnostics(
+    payload: AdminDiagnosticExecuteRequest,
+    request: Request,
+    _admin: User = Depends(require_admin_read_only),
+    _csrf: AuthSession = Depends(require_csrf_read_only),
+    db: Session = Depends(get_db),
+) -> AdminDatabaseDiagnosticsRead:
+    settings = _require_diagnostics_enabled()
+    if not diagnostic_challenges.consume(_diagnostic_client_key(request), payload.challenge, settings.admin_diagnostic_rate_limit):
+        raise HTTPException(status_code=404, detail="Not found.")
     try:
-        table_names = set(inspect(db.connection()).get_table_names())
-        required_tables = {name: name in table_names for name in required_table_names}
-        current_revision = None
-        revision_state = "missing_revision_table" if "alembic_version" not in table_names else "unknown"
-        if "alembic_version" in table_names:
-            revisions = list(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
-            current_revision = revisions[0] if len(revisions) == 1 else None
-            revision_state = "at_head" if current_revision == expected_head else "behind_or_diverged"
-        return AdminDatabaseDiagnosticsRead(
-            database="healthy",
-            required_tables=required_tables,
-            current_revision=current_revision,
-            expected_head=expected_head,
-            revision_state=revision_state,
-        )
+        return AdminDatabaseDiagnosticsRead(**collect_diagnostic_report(db.connection(), settings))
     except Exception as exc:
         db.rollback()
-        if isinstance(exc, SQLAlchemyError):
-            category = database_error_category(exc)
-        else:
-            category = "diagnostic_error"
+        category = database_error_category(exc) if isinstance(exc, SQLAlchemyError) else "diagnostic_error"
         return AdminDatabaseDiagnosticsRead(
             database="unavailable",
-            required_tables={name: False for name in required_table_names},
+            required_tables={},
             current_revision=None,
-            expected_head=expected_head,
+            current_revisions=[],
+            expected_head="20261030_0010",
             revision_state="unavailable",
             error_category=category,
         )
+    finally:
+        db.rollback()
 
 
 @router.get("/admin/users", response_model=AdminUsersRead, tags=["admin"])

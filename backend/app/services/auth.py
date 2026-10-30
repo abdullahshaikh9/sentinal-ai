@@ -184,6 +184,19 @@ def get_current_session(request: Request, db: Session = Depends(get_db)) -> Auth
     return session
 
 
+def get_current_session_read_only(request: Request, db: Session = Depends(get_db)) -> AuthSession:
+    """Authenticate without revoking expired sessions or committing any state."""
+    raw_token = request.cookies.get(get_settings().auth_cookie_name)
+    if not raw_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication is required.")
+    token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
+    session = db.scalar(select(AuthSession).where(AuthSession.token_hash == token_hash, AuthSession.revoked_at.is_(None)))
+    expires_at = session.expires_at.replace(tzinfo=UTC) if session is not None and session.expires_at.tzinfo is None else (session.expires_at if session is not None else None)
+    if session is None or expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your session has expired. Please sign in again.")
+    return session
+
+
 def get_current_user(session: AuthSession = Depends(get_current_session), db: Session = Depends(get_db)) -> User:
     user = db.get(User, session.user_id)
     if user is None or not user.is_active:
@@ -193,7 +206,27 @@ def get_current_user(session: AuthSession = Depends(get_current_session), db: Se
     return user
 
 
+def get_current_user_read_only(session: AuthSession = Depends(get_current_session_read_only), db: Session = Depends(get_db)) -> User:
+    user = db.get(User, session.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Your account is unavailable.")
+    if user.email_verified_at is None or user.phone_verified_at is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email and mobile verification are required before account access.")
+    return user
+
+
 def require_csrf(request: Request, session: AuthSession = Depends(get_current_session)) -> AuthSession:
+    csrf_cookie = request.cookies.get(get_settings().csrf_cookie_name)
+    csrf_header = request.headers.get("X-CSRF-Token")
+    if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header):
+        raise HTTPException(status_code=403, detail="CSRF validation failed.")
+    expected = hashlib.sha256(csrf_cookie.encode()).hexdigest()
+    if not hmac.compare_digest(expected, session.csrf_token_hash):
+        raise HTTPException(status_code=403, detail="CSRF validation failed.")
+    return session
+
+
+def require_csrf_read_only(request: Request, session: AuthSession = Depends(get_current_session_read_only)) -> AuthSession:
     csrf_cookie = request.cookies.get(get_settings().csrf_cookie_name)
     csrf_header = request.headers.get("X-CSRF-Token")
     if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header):

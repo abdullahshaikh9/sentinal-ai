@@ -162,7 +162,7 @@ class LoginAttempt(Base):
     __tablename__ = "login_attempts"
     __table_args__ = (
         UniqueConstraint("attempt_id", "attempt_key", name="uq_login_attempt_id_key"),
-        Index("ix_login_attempt_key_created", "attempt_key", "created_at"),
+        Index("ix_login_attempts_key_created", "attempt_key", "created_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

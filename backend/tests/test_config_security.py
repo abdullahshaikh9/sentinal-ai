@@ -93,6 +93,9 @@ def test_tidb_tls_connect_args_are_verified_and_passed_to_the_engine(tmp_path, m
     db.create_database_engine(settings)
 
     assert captured["connect_args"] == {
+        "connect_timeout": 10,
+        "read_timeout": 10,
+        "write_timeout": 10,
         "ssl_ca": str(certificate),
         "ssl_verify_cert": True,
         "ssl_verify_identity": True,
@@ -109,4 +112,11 @@ def test_tidb_requires_a_readable_ca_certificate(tmp_path) -> None:
 
 def test_local_mysql_configuration_remains_unchanged() -> None:
     settings = Settings(_env_file=None, database_url="mysql+pymysql://user:password@127.0.0.1:3306/sentinel_ai")
-    assert settings.database_connect_args == {}
+    assert settings.database_connect_args == {"connect_timeout": 10, "read_timeout": 10, "write_timeout": 10}
+
+
+def test_diagnostic_feature_requires_a_high_entropy_secret() -> None:
+    with pytest.raises(ValidationError, match="ADMIN_DIAGNOSTIC_SECRET"):
+        Settings(_env_file=None, admin_diagnostics_enabled=True, admin_diagnostic_secret="too-short")
+    settings = Settings(_env_file=None, admin_diagnostics_enabled=True, admin_diagnostic_secret="diagnostic-secret-for-tests-32-chars")
+    assert settings.admin_diagnostics_enabled is True
