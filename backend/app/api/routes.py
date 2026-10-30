@@ -14,13 +14,13 @@ from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
 from app.db import DatabaseUnavailableError, check_database_connection, get_db
-from app.models import ActivityEvent, Asset, AuthSession, Finding, FindingRemediation, LoginAttempt, Notification, OtpChallenge, RemediationChange, ReportMetadata, Scan, User, VerificationAttempt
-from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
+from app.models import ActivityEvent, Asset, AuthSession, Finding, FindingRemediation, LoginAttempt, Notification, OtpChallenge, PasswordResetChallenge, RemediationChange, ReportMetadata, Scan, User, VerificationAttempt
+from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
 from app.services.activity import record_event
 from app.services.ai import AIProviderError, AIRateLimitError, MAX_CONTEXT_FINDINGS, assistant_http_error, ask_provider, build_context, check_rate_limit, configuration_message, provider_context_budget, provider_is_configured, provider_name
 from app.services.guidance import build_defensive_guidance
 from app.services.auth import clear_auth_cookies, clear_login_failures, create_session, finalize_login_attempt, get_current_user, hash_password, normalize_email, require_csrf, reserve_login_attempt, set_auth_cookies, verify_password
-from app.services.otp import OtpSendRateLimitError, check_send_rate_limits, configuration_message as otp_configuration_message, create_challenge, deliver, email_provider_configured, get_challenge, log_delivery_failure, normalize_phone, providers_configured, record_send_attempts, sms_provider_configured, verify_code
+from app.services.otp import OtpSendRateLimitError, check_send_cooldown, check_send_rate_limits, configuration_message as otp_configuration_message, create_challenge, create_password_reset_challenge, deliver, deliver_password_reset_otp, email_provider_configured, get_challenge, log_delivery_failure, normalize_phone, providers_configured, record_send_attempts, sms_provider_configured, verify_code, verify_password_reset_code
 from app.services.reports import build_scan_pdf
 from app.services.scanning.jobs import execute_scan
 from app.services.verification import execute_verification
@@ -303,6 +303,148 @@ def change_password(payload: PasswordChangeRequest, request: Request, db: Sessio
     _notify(db, user.id, "auth.password_changed", "Account password changed", "Your password was changed. Other active sessions were signed out.")
     db.commit()
     return {"message": "Password changed. Other active sessions were signed out."}
+
+
+@router.post("/auth/forgot-password", response_model=PasswordResetPendingResponse, tags=["auth"])
+@router.post("/auth/request-reset", response_model=PasswordResetPendingResponse, tags=["auth"], include_in_schema=False)
+def request_password_reset(
+    payload: PasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> PasswordResetPendingResponse:
+    settings = get_settings()
+    if not email_provider_configured(settings):
+        auth_delivery_logger.error("Password reset email delivery unavailable email_provider=%s", settings.email_provider)
+        raise HTTPException(status_code=503, detail="Email verification is unavailable until the SMTP provider is configured.")
+
+    email = normalize_email(payload.email)
+    client_ip = request.client.host if request.client else "unknown"
+
+    try:
+        check_send_cooldown(db, email, settings)
+        check_send_rate_limits(db, [email], client_ip, settings)
+    except OtpSendRateLimitError as exc:
+        db.rollback()
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+
+    record_send_attempts(db, [email], client_ip, settings)
+
+    raw_request_token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(raw_request_token.encode()).hexdigest()
+
+    user = db.scalar(select(User).where(User.email == email))
+    if user is not None and user.is_active:
+        challenge, code = create_password_reset_challenge(db, user, token_hash, settings)
+        record_event(db, "auth.password_reset_requested", "A password reset code was requested.", owner_id=user.id)
+        db.commit()
+        try:
+            deliver_password_reset_otp(user, code, settings)
+        except Exception as exc:
+            log_delivery_failure("email", settings, exc)
+            raise HTTPException(status_code=503, detail="Password reset delivery failed. Check the backend delivery logs and retry.") from exc
+    else:
+        db.commit()
+
+    return PasswordResetPendingResponse(
+        message="If an account exists with that email, a password reset code has been sent.",
+        reset_token=raw_request_token,
+        resend_after_seconds=settings.otp_resend_cooldown_seconds,
+    )
+
+
+@router.post("/auth/verify-reset-code", response_model=PasswordResetVerifyResponse, tags=["auth"])
+@router.post("/auth/verify-reset-otp", response_model=PasswordResetVerifyResponse, tags=["auth"], include_in_schema=False)
+def verify_reset_otp(
+    payload: PasswordResetVerifyRequest,
+    db: Session = Depends(get_db),
+) -> PasswordResetVerifyResponse:
+    settings = get_settings()
+    token_hash = hashlib.sha256(payload.reset_token.encode()).hexdigest()
+    challenge = db.scalar(
+        select(PasswordResetChallenge)
+        .where(PasswordResetChallenge.request_token_hash == token_hash)
+        .with_for_update()
+    )
+    if challenge is None:
+        raise HTTPException(status_code=400, detail="The reset request is invalid or expired.")
+
+    now = datetime.now(UTC)
+    expires_at = challenge.expires_at.replace(tzinfo=UTC) if challenge.expires_at.tzinfo is None else challenge.expires_at
+
+    if challenge.used_at is not None or challenge.verified_at is not None:
+        raise HTTPException(status_code=400, detail="This reset request has already been used.")
+
+    if expires_at <= now or challenge.attempts >= settings.otp_max_attempts:
+        record_event(db, "auth.password_reset_rejected", "An expired or exhausted password reset challenge was rejected.", owner_id=challenge.user_id)
+        db.commit()
+        raise HTTPException(status_code=400, detail="The reset code is expired or has too many failed attempts.")
+
+    if not verify_password_reset_code(challenge, payload.code, settings):
+        challenge.attempts += 1
+        record_event(db, "auth.password_reset_failed", "A password reset verification code was rejected.", owner_id=challenge.user_id)
+        db.commit()
+        raise HTTPException(status_code=400, detail="The verification code is incorrect.")
+
+    challenge.verified_at = now
+    raw_password_reset_token = secrets.token_urlsafe(32)
+    challenge.reset_token_hash = hashlib.sha256(raw_password_reset_token.encode()).hexdigest()
+    record_event(db, "auth.password_reset_verified", "A password reset verification code was verified.", owner_id=challenge.user_id)
+    db.commit()
+
+    return PasswordResetVerifyResponse(
+        message="Verification code accepted. Please set a new password.",
+        password_reset_token=raw_password_reset_token,
+    )
+
+
+@router.post("/auth/reset-password", response_model=PasswordResetCompleteResponse, tags=["auth"])
+def confirm_password_reset(
+    payload: PasswordResetConfirmRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> PasswordResetCompleteResponse:
+    token_hash = hashlib.sha256(payload.password_reset_token.encode()).hexdigest()
+    challenge = db.scalar(
+        select(PasswordResetChallenge)
+        .where(PasswordResetChallenge.reset_token_hash == token_hash)
+        .with_for_update()
+    )
+    if challenge is None or challenge.verified_at is None:
+        raise HTTPException(status_code=400, detail="The reset token is invalid or expired.")
+
+    if challenge.used_at is not None:
+        raise HTTPException(status_code=400, detail="This reset token has already been used.")
+
+    now = datetime.now(UTC)
+    expires_at = challenge.expires_at.replace(tzinfo=UTC) if challenge.expires_at.tzinfo is None else challenge.expires_at
+    if expires_at <= now:
+        raise HTTPException(status_code=400, detail="The reset token has expired.")
+
+    user = db.get(User, challenge.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=400, detail="This account is unavailable.")
+
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Choose a different password.")
+
+    user.password_hash = hash_password(payload.new_password)
+    challenge.used_at = now
+
+    db.execute(
+        update(AuthSession)
+        .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        .values(revoked_at=now)
+    )
+
+    clear_login_failures(request, user.email, db)
+
+    record_event(db, "auth.password_reset_completed", "The account password was reset; all active sessions were revoked.", owner_id=user.id)
+    _notify(db, user.id, "auth.password_reset_completed", "Password reset successful", "Your password was reset successfully. All previous active sessions were signed out.")
+    db.commit()
+
+    return PasswordResetCompleteResponse(
+        message="Your password has been reset successfully. Please sign in with your new password."
+    )
 
 
 @router.get("/assistant/status", response_model=AssistantStatus, tags=["assistant"])

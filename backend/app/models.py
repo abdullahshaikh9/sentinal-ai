@@ -138,6 +138,24 @@ class OtpSendAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False, index=True)
 
 
+class PasswordResetChallenge(Base):
+    """A single-use email reset challenge, isolated from account-verification OTPs."""
+
+    __tablename__ = "password_reset_challenges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    request_token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    reset_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_salt: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class LoginAttempt(Base):
     """Short-lived failed and in-flight login events, addressed by privacy-reduced digests."""
 

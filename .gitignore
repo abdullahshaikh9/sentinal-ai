@@ -30,6 +30,8 @@ frontend/.env.*
 *.pfx
 *.p12
 *.cert
+# TiDB's public root CA is required at runtime; private keys remain ignored.
+!backend/certs/tidb-ca.pem
 
 # Node.js, Frontend Dependencies, and Build Artifacts
 node_modules/

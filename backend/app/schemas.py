@@ -72,6 +72,57 @@ class PasswordChangeRequest(BaseModel):
         return value
 
 
+class PasswordResetRequest(BaseModel):
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def normalize_reset_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) or len(value) > 320:
+            raise ValueError("A valid email address is required.")
+        return value
+
+
+class PasswordResetVerifyRequest(BaseModel):
+    reset_token: str = Field(min_length=20, max_length=256)
+    code: str
+
+    @field_validator("code")
+    @classmethod
+    def validate_reset_code(cls, value: str) -> str:
+        if not re.fullmatch(r"\d{6}", value):
+            raise ValueError("Verification code must be six digits.")
+        return value
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    password_reset_token: str = Field(min_length=20, max_length=256)
+    new_password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_reset_password(cls, value: str) -> str:
+        if not re.search(r"[a-z]", value) or not re.search(r"[A-Z]", value) or not re.search(r"\d", value):
+            raise ValueError("New password must include upper, lower, and numeric characters.")
+        return value
+
+
+class PasswordResetPendingResponse(BaseModel):
+    message: str
+    reset_token: str
+    resend_after_seconds: int = 60
+
+
+class PasswordResetVerifyResponse(BaseModel):
+    message: str
+    password_reset_token: str
+
+
+class PasswordResetCompleteResponse(BaseModel):
+    message: str
+
+
 class UserRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 
 
 class Base(DeclarativeBase):
@@ -13,8 +13,13 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
+
+
+def create_database_engine(database_settings: Settings):
+    return create_engine(database_settings.database_url, connect_args=database_settings.database_connect_args)
+
+
+engine = create_database_engine(settings)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

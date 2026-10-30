@@ -3,7 +3,7 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { LoaderCircle } from "lucide-react";
 import { AuthProvider, RequireAuth } from "./auth/AuthContext";
 import { AppLayout } from "./layout/AppLayout";
-import { LoginPage, RegisterPage, VerifyPage } from "./pages/AuthPages";
+import { LoginPage, RegisterPage, VerifyPage, ForgotPasswordPage } from "./pages/AuthPages";
 import { LandingPage } from "./pages/LandingPage";
 
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((module) => ({ default: module.DashboardPage })));
@@ -44,6 +44,7 @@ export function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/verify" element={<VerifyPage />} />
             <Route element={<RequireAuth><AppLayout /></RequireAuth>}>

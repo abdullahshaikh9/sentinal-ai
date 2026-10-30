@@ -13,6 +13,7 @@ Set these backend environment values in production:
 - `ALLOWED_ORIGINS=https://<application-host>` (comma-separated HTTPS origins when there is more than one).
 - `TRUSTED_PROXY_HOSTS=<proxy-ip-or-cidr>` when TLS terminates at a proxy. It defaults to loopback and rejects wildcard or non-IP entries in production.
 - `DATABASE_URL=<existing MySQL connection URL>` and apply Alembic head `20261028_0009` during the reviewed deployment window.
+- `DATABASE_SSL_CA_PATH=<absolute path to a readable CA PEM file>` for TiDB Cloud. The application passes this to PyMySQL with both certificate and hostname verification enabled; TiDB Cloud hostnames are rejected at startup unless this value is set.
 - `AUTH_COOKIE_SECURE` may be omitted; production forces Secure cookies. Explicitly setting it to `false` prevents production startup.
 
 If TLS terminates at a reverse proxy, configure `TRUSTED_PROXY_HOSTS` with only
@@ -31,6 +32,15 @@ For a proxy on another host/container, set `TRUSTED_PROXY_HOSTS` to its private
 address or narrow subnet. Do not use `*`. HSTS is a browser policy and does not
 replace TLS configuration at the public ingress; enable HSTS there too if the
 deployment has additional HTTPS-only hosts or needs `includeSubDomains`.
+
+## TiDB Cloud TLS
+
+Deploy the TiDB CA PEM as a readable file in the application image or through
+the platform's protected file mechanism, then set `DATABASE_SSL_CA_PATH` to its
+absolute path. Do not put the PEM contents in `DATABASE_URL`, disable certificate
+verification, or use a URL option that bypasses hostname verification. The
+Nixpacks configuration does not download or create this CA file, so the hosting
+deployment must provide it before the backend starts.
 
 ## Failed-login throttling
 

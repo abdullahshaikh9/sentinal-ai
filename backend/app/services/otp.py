@@ -14,11 +14,11 @@ import sys
 from email.message import EmailMessage
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import OtpChallenge, OtpSendAttempt, User
+from app.models import OtpChallenge, OtpSendAttempt, PasswordResetChallenge, User
 
 
 console_sms_logger = logging.getLogger("sentinel.otp.sms.console")
@@ -137,6 +137,40 @@ def verify_code(challenge: OtpChallenge, code: str, settings: Settings) -> bool:
     return hmac.compare_digest(challenge.code_hash, _hash_code(code, salt, settings.otp_pepper or ""))
 
 
+def create_password_reset_challenge(db: Session, user: User, request_token_hash: str, settings: Settings) -> tuple[PasswordResetChallenge, str]:
+    now = datetime.now(UTC)
+    db.execute(
+        update(PasswordResetChallenge)
+        .where(
+            PasswordResetChallenge.user_id == user.id,
+            PasswordResetChallenge.verified_at.is_(None),
+            PasswordResetChallenge.used_at.is_(None),
+            PasswordResetChallenge.expires_at > now,
+        )
+        .values(expires_at=now)
+    )
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    salt = secrets.token_bytes(16)
+    challenge = PasswordResetChallenge(
+        user_id=user.id,
+        request_token_hash=request_token_hash,
+        code_hash=_hash_code(code, salt, settings.otp_pepper or ""),
+        code_salt=_encode(salt),
+        expires_at=now + timedelta(minutes=settings.otp_ttl_minutes),
+    )
+    db.add(challenge)
+    delivery_logger.info("Password reset challenge created user_id=%s expires_in_minutes=%s", user.id, settings.otp_ttl_minutes)
+    return challenge, code
+
+
+def verify_password_reset_code(challenge: PasswordResetChallenge, code: str, settings: Settings) -> bool:
+    try:
+        salt = base64.urlsafe_b64decode(challenge.code_salt.encode())
+    except ValueError:
+        return False
+    return hmac.compare_digest(challenge.code_hash, _hash_code(code, salt, settings.otp_pepper or ""))
+
+
 def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
     if settings.email_provider.lower() != "smtp" or not settings.smtp_host or not settings.smtp_from:
         raise RuntimeError("Email verification provider is not configured.")
@@ -161,6 +195,33 @@ def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
             password = settings.smtp_password
             if settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"}:
                 password = "".join(password.split())
+            server.login(settings.smtp_username, password)
+        server.send_message(message)
+
+
+def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> None:
+    """Send a reset-only OTP without logging its value or a reset capability."""
+    if not email_provider_configured(settings):
+        raise RuntimeError("Email delivery provider is not configured.")
+    _, sender_email = parseaddr(settings.smtp_from.strip())
+    if not sender_email or "@" not in sender_email:
+        raise RuntimeError("SMTP_FROM must contain the configured sender email address.")
+    message = EmailMessage()
+    message["From"] = formataddr(("Sentinel AI", sender_email))
+    message["To"] = user.email
+    message["Subject"] = "Your Sentinel AI Password Reset Code"
+    message.set_content(
+        "Hello,\n\n"
+        f"Your Sentinel AI password reset code is: {code}\n\n"
+        f"This code expires in {settings.otp_ttl_minutes} minutes. Do not share it with anyone.\n\n"
+        "If you did not request a password reset, you can ignore this message.\n\n"
+        "— Sentinel AI Security Team"
+    )
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.sms_timeout_seconds) as server:
+        if settings.smtp_use_tls:
+            server.starttls()
+        if settings.smtp_username and settings.smtp_password:
+            password = "".join(settings.smtp_password.split()) if settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"} else settings.smtp_password
             server.login(settings.smtp_username, password)
         server.send_message(message)
 
@@ -279,3 +340,12 @@ def record_send_attempts(db: Session, recipients: list[str], client_ip: str, set
     ip_hash = _rate_subject_hash(client_ip or "unknown", settings)
     for recipient_hash in {_rate_subject_hash(recipient, settings) for recipient in recipients}:
         db.add(OtpSendAttempt(recipient_hash=recipient_hash, ip_hash=ip_hash))
+
+
+def check_send_cooldown(db: Session, recipient: str, settings: Settings) -> None:
+    """Enforce a resend cooldown for both existing and unknown addresses."""
+    latest = db.scalar(select(OtpSendAttempt.created_at).where(OtpSendAttempt.recipient_hash == _rate_subject_hash(recipient, settings)).order_by(OtpSendAttempt.created_at.desc(), OtpSendAttempt.id.desc()).limit(1))
+    if latest is not None:
+        sent_at = latest.replace(tzinfo=UTC) if latest.tzinfo is None else latest
+        if datetime.now(UTC) - sent_at < timedelta(seconds=settings.otp_resend_cooldown_seconds):
+            raise OtpSendRateLimitError("Too many verification messages have been requested. Try again later.")

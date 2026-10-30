@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
+from app import db
 
 
 def test_production_requires_secure_cookies_and_https_origins() -> None:
@@ -71,3 +72,41 @@ def test_administrator_allowlist_accepts_positive_ids_and_rejects_invalid_values
     assert settings.administrator_ids == frozenset({12, 34})
     with pytest.raises(ValidationError, match="ADMIN_USER_IDS"):
         Settings(_env_file=None, admin_user_ids="12,0,not-an-id")
+
+
+def test_tidb_tls_connect_args_are_verified_and_passed_to_the_engine(tmp_path, monkeypatch) -> None:
+    certificate = tmp_path / "tidb-ca.pem"
+    certificate.write_text("test certificate", encoding="utf-8")
+    settings = Settings(
+        _env_file=None,
+        database_url="mysql+pymysql://user:password@gateway01.ap-southeast-1.prod.aws.tidbcloud.com:4000/sentinel_ai",
+        database_ssl_ca_path=str(certificate),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_create_engine(url: str, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(db, "create_engine", fake_create_engine)
+    db.create_database_engine(settings)
+
+    assert captured["connect_args"] == {
+        "ssl_ca": str(certificate),
+        "ssl_verify_cert": True,
+        "ssl_verify_identity": True,
+    }
+
+
+def test_tidb_requires_a_readable_ca_certificate(tmp_path) -> None:
+    url = "mysql+pymysql://user:password@gateway01.ap-southeast-1.prod.aws.tidbcloud.com:4000/sentinel_ai"
+    with pytest.raises(ValidationError, match="DATABASE_SSL_CA_PATH is required"):
+        Settings(_env_file=None, database_url=url)
+    with pytest.raises(ValidationError, match="readable CA certificate"):
+        Settings(_env_file=None, database_url=url, database_ssl_ca_path=str(tmp_path / "missing.pem"))
+
+
+def test_local_mysql_configuration_remains_unchanged() -> None:
+    settings = Settings(_env_file=None, database_url="mysql+pymysql://user:password@127.0.0.1:3306/sentinel_ai")
+    assert settings.database_connect_args == {}

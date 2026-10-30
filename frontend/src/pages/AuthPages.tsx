@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useState } from "react";
-import { Eye, EyeOff, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
-import { ApiError, resendOtp, verifyOtp } from "../lib/api";
+import { ApiError, resendOtp, verifyOtp, requestPasswordReset, verifyPasswordResetCode, resetPassword } from "../lib/api";
 import type { LoginVerificationPending } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import type { User } from "../types";
@@ -64,7 +64,254 @@ export function LoginPage() {
       else navigate("/dashboard", { replace: true });
     } catch (err) { setError(err instanceof ApiError ? err.message : "Unable to sign in."); } finally { setBusy(false); }
   };
-  return <AuthShell><h2 className="mb-1 text-2xl font-semibold text-ink">Welcome back</h2><p className="mb-6 text-sm text-slate-500">Sign in to access your security workspace.</p><form onSubmit={submit} className="space-y-4"><div><label htmlFor="email" className="mb-1 block text-sm font-medium text-slate-700">Email</label><input id="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-emerald" autoComplete="email" /></div><PasswordField id="password" value={password} onChange={setPassword} />{error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button type="submit" disabled={busy} className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60">{busy ? "Signing in…" : "Sign in"}</button></form><p className="mt-6 text-center text-sm text-slate-500">Need an account? <Link className="font-semibold text-emerald" to="/register">Register</Link></p></AuthShell>;
+  return <AuthShell><h2 className="mb-1 text-2xl font-semibold text-ink">Welcome back</h2><p className="mb-6 text-sm text-slate-500">Sign in to access your security workspace.</p><form onSubmit={submit} className="space-y-4"><div><label htmlFor="email" className="mb-1 block text-sm font-medium text-slate-700">Email</label><input id="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-emerald" autoComplete="email" /></div><div><PasswordField id="password" value={password} onChange={setPassword} /><div className="mt-1 flex justify-end"><Link to="/forgot-password" className="text-xs font-semibold text-emerald hover:underline">Forgot password?</Link></div></div>{error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button type="submit" disabled={busy} className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60">{busy ? "Signing in…" : "Sign in"}</button></form><p className="mt-6 text-center text-sm text-slate-500">Need an account? <Link className="font-semibold text-emerald" to="/register">Register</Link></p></AuthShell>;
+}
+
+export function ForgotPasswordPage() {
+  const navigate = useNavigate();
+  useEffect(() => { document.title = "Forgot Password · Sentinel AI"; }, []);
+
+  const [step, setStep] = useState<"request" | "verify" | "reset" | "success">("request");
+  const [email, setEmail] = useState("");
+  const [resetToken, setResetToken] = useState("");
+  const [code, setCode] = useState("");
+  const [passwordResetToken, setPasswordResetToken] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [resendUntil, setResendUntil] = useState(0);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (resendUntil <= 0) return;
+    const update = () => setSecondsLeft(Math.max(0, Math.ceil((resendUntil - Date.now()) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendUntil]);
+
+  const handleRequestSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      const result = await requestPasswordReset(email);
+      setResetToken(result.reset_token);
+      setResendUntil(Date.now() + result.resend_after_seconds * 1000);
+      setInfo(result.message);
+      setStep("verify");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to request password reset.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleVerifySubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!/^\d{6}$/.test(code)) {
+      setError("Enter the six-digit verification code.");
+      return;
+    }
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await verifyPasswordResetCode(resetToken, code);
+      setPasswordResetToken(result.password_reset_token);
+      setStep("reset");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to verify this code.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResend = async () => {
+    if (busy || secondsLeft > 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await requestPasswordReset(email);
+      setResetToken(result.reset_token);
+      setResendUntil(Date.now() + result.resend_after_seconds * 1000);
+      setInfo("A new verification code has been sent if the account exists.");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to resend reset code.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResetSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    const strengthError = passwordMessage(newPassword);
+    if (strengthError) {
+      setError(strengthError);
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords do not match.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await resetPassword(passwordResetToken, newPassword);
+      setStep("success");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Unable to reset password.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (step === "success") {
+    return (
+      <AuthShell>
+        <div className="text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald/10 text-emerald">
+            <CheckCircle2 size={28} />
+          </div>
+          <h2 className="mb-1 text-2xl font-semibold text-ink">Password reset complete</h2>
+          <p className="mb-6 text-sm text-slate-500">
+            Your password has been reset successfully. All previous active sessions were signed out.
+          </p>
+          <button
+            type="button"
+            onClick={() => navigate("/login", { replace: true })}
+            className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white hover:bg-emerald/90"
+          >
+            Sign in with new password
+          </button>
+        </div>
+      </AuthShell>
+    );
+  }
+
+  if (step === "reset") {
+    return (
+      <AuthShell>
+        <h2 className="mb-1 text-2xl font-semibold text-ink">Set new password</h2>
+        <p className="mb-6 text-sm text-slate-500">Choose a new strong password for your Sentinel AI account.</p>
+        <form onSubmit={handleResetSubmit} className="space-y-4">
+          <PasswordField id="new-password" value={newPassword} onChange={setNewPassword} label="New password" />
+          <p className="-mt-2 text-xs text-slate-500">At least 12 characters, with upper, lower, and numeric characters.</p>
+          <PasswordField id="confirm-password" value={confirmPassword} onChange={setConfirmPassword} label="Confirm new password" />
+          {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy}
+            className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Resetting password…" : "Reset password"}
+          </button>
+        </form>
+        <p className="mt-6 text-center text-sm text-slate-500">
+          <Link className="font-semibold text-emerald" to="/login">Back to sign in</Link>
+        </p>
+      </AuthShell>
+    );
+  }
+
+  if (step === "verify") {
+    return (
+      <AuthShell>
+        <h2 className="mb-1 text-2xl font-semibold text-ink">Enter reset code</h2>
+        <p className="mb-6 text-sm text-slate-500">
+          Check <span className="font-medium text-slate-700">{maskEmail(email)}</span> for your six-digit verification code.
+        </p>
+        {info && <p className="mb-4 rounded-lg bg-emerald/10 p-3 text-sm text-emerald">{info}</p>}
+        <form onSubmit={handleVerifySubmit} className="space-y-4">
+          <div>
+            <label htmlFor="reset-code" className="mb-1 block text-sm font-medium text-slate-700">Verification code</label>
+            <input
+              id="reset-code"
+              aria-label="Verification code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              required
+              autoFocus
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="123456"
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-center text-lg tracking-widest outline-none focus:border-emerald"
+            />
+          </div>
+          {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+          <button
+            type="submit"
+            disabled={busy}
+            className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60"
+          >
+            {busy ? "Verifying…" : "Verify code"}
+          </button>
+        </form>
+        <div className="mt-4 flex items-center justify-between text-xs">
+          <button
+            type="button"
+            onClick={() => void handleResend()}
+            disabled={busy || secondsLeft > 0}
+            className="font-semibold text-emerald disabled:opacity-50"
+          >
+            {secondsLeft > 0 ? `Resend code in ${secondsLeft}s` : "Resend code"}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setStep("request"); setCode(""); setError(null); }}
+            className="text-slate-500 hover:text-slate-700"
+          >
+            Use a different email
+          </button>
+        </div>
+        <p className="mt-6 text-center text-sm text-slate-500">
+          <Link className="font-semibold text-emerald" to="/login">Back to sign in</Link>
+        </p>
+      </AuthShell>
+    );
+  }
+
+  return (
+    <AuthShell>
+      <h2 className="mb-1 text-2xl font-semibold text-ink">Reset your password</h2>
+      <p className="mb-6 text-sm text-slate-500">
+        Enter your account email to receive a six-digit verification code.
+      </p>
+      <form onSubmit={handleRequestSubmit} className="space-y-4">
+        <div>
+          <label htmlFor="reset-email" className="mb-1 block text-sm font-medium text-slate-700">Email</label>
+          <input
+            id="reset-email"
+            required
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@company.com"
+            className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-emerald"
+            autoComplete="email"
+          />
+        </div>
+        {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
+        <button
+          type="submit"
+          disabled={busy}
+          className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60"
+        >
+          {busy ? "Sending code…" : "Send reset code"}
+        </button>
+      </form>
+      <p className="mt-6 text-center text-sm text-slate-500">
+        Remember your password? <Link className="font-semibold text-emerald" to="/login">Sign in</Link>
+      </p>
+    </AuthShell>
+  );
 }
 
 function VerificationStep({ pending, onComplete }: { pending: PendingVerification; onComplete: (user: User) => void }) {

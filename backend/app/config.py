@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     app_name: str = "Sentinel AI"
     app_env: str = "development"
     database_url: str = "sqlite:///./sentinel.db"
+    database_ssl_ca_path: str | None = None
     api_v1_prefix: str = "/api/v1"
     allowed_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
     trusted_proxy_hosts: str = "127.0.0.1,::1"
@@ -62,12 +63,28 @@ class Settings(BaseSettings):
             raise ValueError("ADMIN_USER_IDS must be a comma-separated list of positive user IDs.")
         return ",".join(dict.fromkeys(ids))
 
+    @field_validator("database_ssl_ca_path")
+    @classmethod
+    def validate_database_ssl_ca_path(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        certificate_path = Path(value).expanduser()
+        try:
+            with certificate_path.open("rb"):
+                pass
+        except OSError as exc:
+            raise ValueError("DATABASE_SSL_CA_PATH must point to a readable CA certificate file.") from exc
+        return str(certificate_path)
+
     @property
     def administrator_ids(self) -> frozenset[int]:
         return frozenset(int(item) for item in self.admin_user_ids.split(",") if item)
 
     @model_validator(mode="after")
     def validate_production_security(self) -> "Settings":
+        database_host = (urlsplit(self.database_url).hostname or "").lower()
+        if database_host.endswith(".tidbcloud.com") and not self.database_ssl_ca_path:
+            raise ValueError("DATABASE_SSL_CA_PATH is required for TiDB Cloud connections.")
         if self.app_env.lower() != "production":
             return self
         if self.auth_cookie_secure is False:
@@ -96,6 +113,18 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [origin.strip() for origin in self.allowed_origins.split(",") if origin.strip()]
+
+    @property
+    def database_connect_args(self) -> dict[str, bool | str]:
+        if self.database_url.startswith("sqlite"):
+            return {"check_same_thread": False}
+        if self.database_ssl_ca_path:
+            return {
+                "ssl_ca": self.database_ssl_ca_path,
+                "ssl_verify_cert": True,
+                "ssl_verify_identity": True,
+            }
+        return {}
 
     @property
     def secure_auth_cookies(self) -> bool:
