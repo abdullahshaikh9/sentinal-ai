@@ -370,6 +370,23 @@ def test_admin_access_is_explicitly_allowlisted_and_overview_uses_saved_records(
     assert data["failed_login_counters_active"] == 0
 
 
+def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(platform_client, monkeypatch):
+    from app.config import Settings
+
+    client, _, admin = platform_client
+    monkeypatch.setattr(routes, "get_settings", lambda: Settings(_env_file=None, admin_user_ids=str(admin.id)))
+
+    response = client.get("/api/v1/admin/database-diagnostics")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["database"] == "healthy"
+    assert data["required_tables"]["password_reset_challenges"] is True
+    assert data["required_tables"]["users"] is True
+    assert data["expected_head"] == "20261030_0010"
+    assert data["revision_state"] == "missing_revision_table"
+
+
 def test_all_admin_routes_deny_authenticated_non_allowlisted_accounts(platform_client, monkeypatch):
     from app.config import Settings
 
@@ -378,6 +395,7 @@ def test_all_admin_routes_deny_authenticated_non_allowlisted_accounts(platform_c
     read_paths = [
         "/api/v1/admin/overview",
         "/api/v1/admin/health",
+        "/api/v1/admin/database-diagnostics",
         "/api/v1/admin/users",
         "/api/v1/admin/assets",
         "/api/v1/admin/findings",

@@ -16,6 +16,16 @@ Set these backend environment values in production:
 - `DATABASE_SSL_CA_PATH=<absolute path to a readable CA PEM file>` for TiDB Cloud. The application passes this to PyMySQL with both certificate and hostname verification enabled; TiDB Cloud hostnames are rejected at startup unless this value is set.
 - `AUTH_COOKIE_SECURE` may be omitted; production forces Secure cookies. Explicitly setting it to `false` prevents production startup.
 
+The Procfile includes a guarded `release` process for the password-reset migration.
+It is disabled unless `MIGRATION_RELEASE_ENABLED=true` is explicitly configured.
+When enabled, it refuses every target except the approved TiDB host/database and
+refuses every current revision except `20261028_0009`; it only advances to
+`20261030_0010`. Enable it for one reviewed release after confirming the target,
+then remove or disable the variable. It never downgrades, stamps, resets, or
+deletes data. If the hosting platform does not support Procfile release
+processes, run the same command as its one-time release/deploy command:
+`python -m app.migration_release`.
+
 If TLS terminates at a reverse proxy, configure `TRUSTED_PROXY_HOSTS` with only
 the proxy's actual source IP address(es) or CIDR ranges. The default trusts only
 loopback. The proxy must overwrite (not append to client-supplied values for)

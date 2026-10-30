@@ -27,6 +27,25 @@ class DatabaseUnavailableError(RuntimeError):
     """Raised when the configured database cannot accept a connection."""
 
 
+def database_error_category(error: SQLAlchemyError) -> str:
+    """Classify a database failure without exposing driver messages or secrets."""
+    original = getattr(error, "orig", error)
+    message = str(original).lower()
+    if "doesn't exist" in message or "no such table" in message or "unknown table" in message:
+        return "missing_table"
+    if "access denied" in message or "permission" in message or "not authorized" in message:
+        return "permission_denied"
+    if "ssl" in message or "tls" in message or "certificate" in message:
+        return "tls_error"
+    if "timeout" in message:
+        return "timeout"
+    if "connect" in message or "connection" in message or "server has gone away" in message:
+        return "connection_error"
+    if "duplicate" in message or "constraint" in message:
+        return "constraint_violation"
+    return "database_error"
+
+
 def check_database_connection() -> None:
     """Verify the configured database without exposing credentials in the error."""
     try:

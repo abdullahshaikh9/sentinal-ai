@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     textbee_enabled: bool = False
     textbee_api_key: str | None = None
     admin_user_ids: str = ""
+    migration_release_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 

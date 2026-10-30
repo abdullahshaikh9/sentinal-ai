@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -149,6 +149,22 @@ def test_password_reset_email_enumeration_protection(client) -> None:
     verify_resp = test_client.post("/api/v1/auth/verify-reset-code", json={"reset_token": data["reset_token"], "code": "123456"})
     assert verify_resp.status_code == 400
     assert "invalid or expired" in verify_resp.json()["detail"].lower()
+
+
+def test_password_reset_missing_challenge_table_returns_safe_database_error(client, caplog) -> None:
+    test_client, factory, _ = client
+    _create_verified_user(factory, email="missing-table@example.test")
+    with factory() as db:
+        db.execute(text("DROP TABLE password_reset_challenges"))
+        db.commit()
+
+    caplog.set_level("ERROR", logger="sentinel.database")
+    response = test_client.post("/api/v1/auth/forgot-password", json={"email": "missing-table@example.test"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "The configured database is unavailable. Check DATABASE_URL and ensure the database server is running."
+    assert "category=missing_table" in caplog.text
+    assert "password_reset_challenges" not in caplog.text
 
 
 def test_password_reset_invalid_code_and_attempt_counter(client) -> None:

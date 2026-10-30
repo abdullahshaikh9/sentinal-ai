@@ -9,6 +9,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.routes import router
 from app.config import get_settings
+from app.db import database_error_category
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -16,7 +17,20 @@ app = FastAPI(title=settings.app_name, version="0.1.0", description="Evidence-ba
 
 
 @app.exception_handler(SQLAlchemyError)
-async def database_error_handler(_: Request, __: SQLAlchemyError) -> JSONResponse:
+async def database_error_handler(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    original = getattr(exc, "orig", None)
+    original_code = None
+    if original is not None and getattr(original, "args", None) and isinstance(original.args[0], int):
+        original_code = original.args[0]
+    logging.getLogger("sentinel.database").error(
+        "Database operation failed method=%s path=%s error_class=%s driver_class=%s category=%s driver_code=%s",
+        request.method,
+        request.url.path,
+        type(exc).__name__,
+        type(original).__name__ if original is not None else "none",
+        database_error_category(exc),
+        original_code if original_code is not None else "none",
+    )
     return JSONResponse(
         status_code=503,
         content={"detail": "The configured database is unavailable. Check DATABASE_URL and ensure the database server is running."},

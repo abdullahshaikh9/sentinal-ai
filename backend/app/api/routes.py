@@ -8,14 +8,14 @@ from collections import defaultdict
 from datetime import UTC, date as Date, datetime, time, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
-from sqlalchemy import and_, case, func, inspect, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, case, func, inspect, select, text, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.config import get_settings
-from app.db import DatabaseUnavailableError, check_database_connection, get_db
+from app.db import DatabaseUnavailableError, check_database_connection, database_error_category, get_db
 from app.models import ActivityEvent, Asset, AuthSession, Finding, FindingRemediation, LoginAttempt, Notification, OtpChallenge, PasswordResetChallenge, RemediationChange, ReportMetadata, Scan, User, VerificationAttempt
-from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
+from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminDatabaseDiagnosticsRead, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
 from app.services.activity import record_event
 from app.services.ai import AIProviderError, AIRateLimitError, MAX_CONTEXT_FINDINGS, assistant_http_error, ask_provider, build_context, check_rate_limit, configuration_message, provider_context_budget, provider_is_configured, provider_name
 from app.services.guidance import build_defensive_guidance
@@ -851,6 +851,43 @@ def admin_health(db: Session = Depends(get_db), _admin: User = Depends(require_a
         sms_configured=sms_provider_configured(settings),
         provider_health_note="Provider status reflects configuration only; no outbound connectivity check was performed.",
     )
+
+
+@router.get("/admin/database-diagnostics", response_model=AdminDatabaseDiagnosticsRead, tags=["admin"])
+def admin_database_diagnostics(db: Session = Depends(get_db), _admin: User = Depends(require_admin)) -> AdminDatabaseDiagnosticsRead:
+    """Read-only database and migration diagnostics for administrators."""
+    expected_head = "20261030_0010"
+    required_table_names = ("users", "otp_send_attempts", "password_reset_challenges", "activity_events", "alembic_version")
+    try:
+        table_names = set(inspect(db.connection()).get_table_names())
+        required_tables = {name: name in table_names for name in required_table_names}
+        current_revision = None
+        revision_state = "missing_revision_table" if "alembic_version" not in table_names else "unknown"
+        if "alembic_version" in table_names:
+            revisions = list(db.execute(text("SELECT version_num FROM alembic_version")).scalars())
+            current_revision = revisions[0] if len(revisions) == 1 else None
+            revision_state = "at_head" if current_revision == expected_head else "behind_or_diverged"
+        return AdminDatabaseDiagnosticsRead(
+            database="healthy",
+            required_tables=required_tables,
+            current_revision=current_revision,
+            expected_head=expected_head,
+            revision_state=revision_state,
+        )
+    except Exception as exc:
+        db.rollback()
+        if isinstance(exc, SQLAlchemyError):
+            category = database_error_category(exc)
+        else:
+            category = "diagnostic_error"
+        return AdminDatabaseDiagnosticsRead(
+            database="unavailable",
+            required_tables={name: False for name in required_table_names},
+            current_revision=None,
+            expected_head=expected_head,
+            revision_state="unavailable",
+            error_category=category,
+        )
 
 
 @router.get("/admin/users", response_model=AdminUsersRead, tags=["admin"])

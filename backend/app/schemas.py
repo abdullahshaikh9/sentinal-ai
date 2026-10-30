@@ -532,6 +532,15 @@ class AdminHealthRead(BaseModel):
     provider_health_note: str
 
 
+class AdminDatabaseDiagnosticsRead(BaseModel):
+    database: str
+    required_tables: dict[str, bool]
+    current_revision: str | None
+    expected_head: str
+    revision_state: str
+    error_category: str | None = None
+
+
 class AdminUserStatusUpdate(BaseModel):
     is_active: bool
     current_password: str = Field(min_length=1, max_length=128)
