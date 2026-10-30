@@ -12,19 +12,33 @@ Set these backend environment values in production:
 - `APP_ENV=production` (enables the redirect and HSTS middleware and Secure auth cookies).
 - `ALLOWED_ORIGINS=https://<application-host>` (comma-separated HTTPS origins when there is more than one).
 - `TRUSTED_PROXY_HOSTS=<proxy-ip-or-cidr>` when TLS terminates at a proxy. It defaults to loopback and rejects wildcard or non-IP entries in production.
-- `DATABASE_URL=<existing MySQL connection URL>` and apply Alembic head `20261028_0009` during the reviewed deployment window.
+- `DATABASE_URL=<existing MySQL connection URL>` and apply the reviewed Alembic head during the controlled migration window.
 - `DATABASE_SSL_CA_PATH=<absolute path to a readable CA PEM file>` for TiDB Cloud. The application passes this to PyMySQL with both certificate and hostname verification enabled; TiDB Cloud hostnames are rejected at startup unless this value is set.
 - `AUTH_COOKIE_SECURE` may be omitted; production forces Secure cookies. Explicitly setting it to `false` prevents production startup.
 
-The Procfile includes a guarded `release` process for the password-reset migration.
-The release process explicitly enables the guard; the web process never does.
-It refuses every target except the approved TiDB host/database and
-refuses every current revision except `20261028_0009`; it only advances to
-`20261030_0010`. Enable it for one reviewed release after confirming the target,
-then remove or disable the variable. It never downgrades, stamps, resets, or
-deletes data. If the hosting platform does not support Procfile release
-processes, run the same command as its one-time release/deploy command:
-`python -m app.migration_release`.
+The Procfile and Nixpacks start phase run only Uvicorn; they never run migrations.
+EthioDeploy must not configure a migration command as an image-build command.
+Run the guarded migration only once in a runtime release/job environment after
+confirming the target and current revision:
+`python -m app.migration_release --confirm-production-target`.
+It refuses every target except the approved TiDB host/database and refuses every
+current revision except `20261028_0009`; it only advances to `20261030_0010`.
+It never downgrades, stamps, resets, or deletes data.
+
+The production operations commands are separate from the web start command:
+
+```text
+python -m app.production_db_ops diagnose --confirm-production-target
+python -m app.production_db_ops verify-schema --confirm-production-target
+python -m app.production_db_ops migrate --confirm-production-target
+python -m app.production_db_ops verify --confirm-production-target
+```
+
+Run `diagnose` and `verify-schema` first, review their exit status and output,
+and run `migrate` only once from a controlled runtime job. These commands
+reject unexpected host, port, database, or TiDB TLS settings and never print
+credentials. `migrate` uses a database advisory lock and refuses unexpected
+Alembic revisions; it is not an image-build command.
 
 If TLS terminates at a reverse proxy, configure `TRUSTED_PROXY_HOSTS` with only
 the proxy's actual source IP address(es) or CIDR ranges. The default trusts only
@@ -66,9 +80,9 @@ same migrated database without Redis. The shared mutex is a throughput
 bottleneck under very high login volume and should be load-tested before scaling
 to many workers.
 
-A new database must be migrated to Alembic head (`20261028_0009`) before
-deploying this code. The migration creates two tables and one mutex row; it does
-not alter existing account or scan rows. Expired events are removed during
+A new database must be migrated to Alembic head (`20261030_0010`) before
+deploying this code. The `20261028_0009` migration creates two tables and one
+mutex row; it does not alter existing account or scan rows. Expired events are removed during
 admission while the mutex is held. If a worker exits with an in-flight event,
 the event expires after ten minutes.
 
