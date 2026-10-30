@@ -4,7 +4,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -407,6 +407,26 @@ def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(pla
 def test_admin_database_diagnostics_is_disabled_by_default(platform_client):
     client, _, _ = platform_client
     assert client.post("/api/v1/admin/database-diagnostics/challenge").status_code == 404
+
+
+def test_admin_database_diagnostics_reports_missing_required_table(platform_client, monkeypatch):
+    client, factory, admin = platform_client
+    monkeypatch.setattr(routes, "get_settings", lambda: Settings(_env_file=None, admin_user_ids=str(admin.id), admin_diagnostics_enabled=True, admin_diagnostic_secret="diagnostic-secret-for-tests-32-chars"))
+    monkeypatch.setattr(routes, "validate_confirmed_target", lambda _settings: None)
+    with factory.kw["bind"].begin() as connection:
+        connection.execute(text("DROP TABLE password_reset_challenges"))
+
+    challenge = client.post(
+        "/api/v1/admin/database-diagnostics/challenge",
+        headers={"X-Sentinel-Diagnostic-Secret": "diagnostic-secret-for-tests-32-chars"},
+    )
+    response = client.post("/api/v1/admin/database-diagnostics", json={"challenge": challenge.json()["challenge"]})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["required_tables"]["password_reset_challenges"] is False
+    assert "missing_table:password_reset_challenges" in data["schema_issues"]
+    assert data["schema_compatible"] is False
 
 
 def test_all_admin_routes_deny_authenticated_non_allowlisted_accounts(platform_client, monkeypatch):
