@@ -144,6 +144,7 @@ def build_plan(source_connection, destination_connection, settings: Settings, ba
         "source_missing_tables": source_missing,
         "source_relationship_issues": relationship_issues,
         "schema_issues": destination_report["schema_issues"],
+        "rollback_plan": "A failed pre-commit import rolls back as one transaction. A committed import is not undone with ad hoc DELETE statements; stop and restore from an approved destination backup after review.",
     }
 
 
@@ -173,7 +174,15 @@ def execute_import(source_engine, destination_engine, settings: Settings, backup
                 if plan["status"] != "safe_to_import":
                     raise RuntimeError("Import refused because the destination or source is not in the reviewed safe state.")
                 copied = {name: _copy_table(source_connection, destination_connection, name, batch_size) for name in IMPORT_TABLES}
-            return {"status": "imported", "copied_counts": copied}
+            post_import_counts = _table_counts(destination_connection, IMPORT_TABLES)
+            post_import_relationship_issues = _source_relationship_issues(destination_connection)
+            return {
+                "status": "imported",
+                "copied_counts": copied,
+                "post_import_counts": post_import_counts,
+                "post_import_relationship_issues": post_import_relationship_issues,
+                "rollback_plan": "A failed pre-commit import rolls back as one transaction. A committed import is not undone with ad hoc DELETE statements; stop and restore from an approved destination backup after review.",
+            }
         finally:
             destination_connection.execute(text("SELECT RELEASE_LOCK(:lock_name)"), {"lock_name": "sentinel_ai_data_import"})
             destination_connection.commit()

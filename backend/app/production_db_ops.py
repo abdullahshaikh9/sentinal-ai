@@ -40,7 +40,7 @@ EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
 
 def _configured_identity(settings: Settings, connection) -> dict[str, object]:
     parsed = urlsplit(settings.database_url)
-    return {
+    identity = {
         "configured_host": parsed.hostname,
         "configured_port": parsed.port,
         "configured_database": parsed.path.lstrip("/"),
@@ -49,6 +49,10 @@ def _configured_identity(settings: Settings, connection) -> dict[str, object]:
         "expected_database": EXPECTED_DATABASE,
         "engine": connection.dialect.name,
     }
+    if connection.dialect.name == "mysql":
+        identity["server_database"] = connection.execute(text("SELECT DATABASE()")).scalar_one()
+        identity["server_database_matches_config"] = identity["server_database"] == identity["configured_database"]
+    return identity
 
 
 def _schema_issues(connection) -> list[str]:
