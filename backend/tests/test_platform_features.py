@@ -383,6 +383,9 @@ def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(pla
     assert data["database"] == "healthy"
     assert data["required_tables"]["password_reset_challenges"] is True
     assert data["required_tables"]["users"] is True
+    assert data["required_tables"]["scans"] is True
+    assert data["required_tables"]["findings"] is True
+    assert data["required_tables"]["report_metadata"] is True
     assert data["expected_head"] == "20261030_0010"
     assert data["revision_state"] == "missing_revision_table"
 

@@ -857,7 +857,25 @@ def admin_health(db: Session = Depends(get_db), _admin: User = Depends(require_a
 def admin_database_diagnostics(db: Session = Depends(get_db), _admin: User = Depends(require_admin)) -> AdminDatabaseDiagnosticsRead:
     """Read-only database and migration diagnostics for administrators."""
     expected_head = "20261030_0010"
-    required_table_names = ("users", "otp_send_attempts", "password_reset_challenges", "activity_events", "alembic_version")
+    required_table_names = (
+        "scans",
+        "findings",
+        "verification_attempts",
+        "report_metadata",
+        "assets",
+        "activity_events",
+        "users",
+        "auth_sessions",
+        "otp_challenges",
+        "otp_send_attempts",
+        "password_reset_challenges",
+        "login_attempts",
+        "login_rate_limit_mutex",
+        "finding_remediation",
+        "remediation_changes",
+        "notifications",
+        "alembic_version",
+    )
     try:
         table_names = set(inspect(db.connection()).get_table_names())
         required_tables = {name: name in table_names for name in required_table_names}

@@ -33,12 +33,20 @@ def database_error_category(error: SQLAlchemyError) -> str:
     message = str(original).lower()
     if "doesn't exist" in message or "no such table" in message or "unknown table" in message:
         return "missing_table"
-    if "access denied" in message or "permission" in message or "not authorized" in message:
+    if "access denied" in message or "authentication" in message:
+        return "authentication_failure"
+    if "permission" in message or "not authorized" in message:
         return "permission_denied"
     if "ssl" in message or "tls" in message or "certificate" in message:
         return "tls_error"
+    if "name or service not known" in message or "getaddrinfo failed" in message or "unknown host" in message:
+        return "dns_failure"
+    if "connection refused" in message:
+        return "connection_refused"
     if "timeout" in message:
         return "timeout"
+    if "syntax error" in message or "unknown column" in message or "incompatible" in message:
+        return "sql_incompatibility"
     if "connect" in message or "connection" in message or "server has gone away" in message:
         return "connection_error"
     if "duplicate" in message or "constraint" in message:

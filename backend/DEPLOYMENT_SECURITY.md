@@ -17,8 +17,8 @@ Set these backend environment values in production:
 - `AUTH_COOKIE_SECURE` may be omitted; production forces Secure cookies. Explicitly setting it to `false` prevents production startup.
 
 The Procfile includes a guarded `release` process for the password-reset migration.
-It is disabled unless `MIGRATION_RELEASE_ENABLED=true` is explicitly configured.
-When enabled, it refuses every target except the approved TiDB host/database and
+The release process explicitly enables the guard; the web process never does.
+It refuses every target except the approved TiDB host/database and
 refuses every current revision except `20261028_0009`; it only advances to
 `20261030_0010`. Enable it for one reviewed release after confirming the target,
 then remove or disable the variable. It never downgrades, stamps, resets, or
