@@ -36,6 +36,7 @@ EXPECTED_INDEXES: dict[str, tuple[str, ...]] = {
     "users": ("email", "uq_users_phone_number"),
     "verification_attempts": ("ix_verification_attempts_finding_id", "ix_verification_attempts_scan_id"),
 }
+MAX_DIAGNOSTIC_SCHEMA_ISSUES = 100
 
 
 def _configured_identity(settings: Settings, connection) -> dict[str, object]:
@@ -87,7 +88,8 @@ def collect_diagnostic_report(connection, settings: Settings) -> dict[str, objec
     for name in REQUIRED_TABLE_NAMES:
         if name in actual_tables:
             row_counts[name] = int(connection.execute(text(f"SELECT COUNT(*) FROM `{name}`")).scalar_one())
-    issues = _schema_issues(connection)
+    all_issues = _schema_issues(connection)
+    issues = all_issues[:MAX_DIAGNOSTIC_SCHEMA_ISSUES]
     return {
         "database": "healthy",
         "database_identity": _configured_identity(settings, connection),
@@ -102,9 +104,21 @@ def collect_diagnostic_report(connection, settings: Settings) -> dict[str, objec
         "expected_head": EXPECTED_HEAD,
         "revision_state": "at_head" if revisions == [EXPECTED_HEAD] else ("missing_revision_table" if "alembic_version" not in actual_tables else "behind_or_diverged"),
         "row_counts": row_counts,
-        "schema_compatible": not issues,
+        "schema_compatible": not all_issues,
         "schema_issues": issues,
     }
+
+
+def validate_confirmed_target(settings: Settings) -> None:
+    """Validate the exact production target before any diagnostic SQL runs."""
+    if not _target_is_expected(settings.database_url):
+        raise RuntimeError("The configured database is not the approved production TiDB target.")
+    ca_path = settings.database_ssl_ca_path
+    if not ca_path or not Path(ca_path).is_file():
+        raise RuntimeError("The configured TiDB CA certificate is missing or unreadable.")
+    connect_args = settings.database_connect_args
+    if connect_args.get("ssl_verify_cert") is not True or connect_args.get("ssl_verify_identity") is not True:
+        raise RuntimeError("TiDB certificate and hostname verification are not enabled.")
 
 
 def _require_confirmed_target(confirmed: bool):
@@ -112,13 +126,7 @@ def _require_confirmed_target(confirmed: bool):
     if not confirmed:
         raise RuntimeError("Pass --confirm-production-target from the reviewed production runtime.")
     parsed = urlsplit(settings.database_url)
-    if not _target_is_expected(settings.database_url):
-        raise RuntimeError("The configured database is not the approved production TiDB target.")
-    ca_path = settings.database_ssl_ca_path
-    if not ca_path or not Path(ca_path).is_file():
-        raise RuntimeError("The configured TiDB CA certificate is missing or unreadable.")
-    if not settings.database_connect_args.get("ssl_verify_cert") or not settings.database_connect_args.get("ssl_verify_identity"):
-        raise RuntimeError("TiDB certificate and hostname verification are not enabled.")
+    validate_confirmed_target(settings)
     return settings, parsed
 
 

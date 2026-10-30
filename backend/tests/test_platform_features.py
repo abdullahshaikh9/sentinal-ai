@@ -377,6 +377,7 @@ def test_admin_database_diagnostics_is_read_only_and_reports_required_tables(pla
 
     client, _, admin = platform_client
     monkeypatch.setattr(routes, "get_settings", lambda: Settings(_env_file=None, admin_user_ids=str(admin.id), admin_diagnostics_enabled=True, admin_diagnostic_secret="diagnostic-secret-for-tests-32-chars"))
+    monkeypatch.setattr(routes, "validate_confirmed_target", lambda _settings: None)
 
     challenge = client.post(
         "/api/v1/admin/database-diagnostics/challenge",

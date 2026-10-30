@@ -25,7 +25,7 @@ from app.services.reports import build_scan_pdf
 from app.services.scanning.jobs import execute_scan
 from app.services.verification import execute_verification
 from app.services.diagnostic_access import diagnostic_challenges
-from app.production_db_ops import collect_diagnostic_report
+from app.production_db_ops import collect_diagnostic_report, validate_confirmed_target
 
 router = APIRouter()
 assistant_logger = logging.getLogger("sentinel.assistant")
@@ -878,6 +878,10 @@ def issue_admin_database_diagnostic_challenge(
     _csrf: AuthSession = Depends(require_csrf_read_only),
 ) -> AdminDiagnosticChallengeRead:
     settings = _require_diagnostics_enabled()
+    try:
+        validate_confirmed_target(settings)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Diagnostic target is unavailable.")
     challenge = diagnostic_challenges.issue(
         _diagnostic_client_key(request),
         x_sentinel_diagnostic_secret or "",
@@ -899,6 +903,10 @@ def admin_database_diagnostics(
     db: Session = Depends(get_db),
 ) -> AdminDatabaseDiagnosticsRead:
     settings = _require_diagnostics_enabled()
+    try:
+        validate_confirmed_target(settings)
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="Diagnostic target is unavailable.")
     if not diagnostic_challenges.consume(_diagnostic_client_key(request), payload.challenge, settings.admin_diagnostic_rate_limit):
         raise HTTPException(status_code=404, detail="Not found.")
     try:
