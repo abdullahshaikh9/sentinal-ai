@@ -4,7 +4,6 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
-from starlette.middleware.httpsredirect import HTTPSRedirectMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app.api.routes import router
@@ -69,9 +68,9 @@ class _HSTSMiddleware:
 
 
 if settings.app_env.lower() == "production":
-    # ProxyHeaders must be outermost so the redirect and HSTS policy see the
-    # original scheme only when the connection came from a trusted proxy.
-    app.add_middleware(HTTPSRedirectMiddleware)
+    # TLS terminates at the hosting ingress. Do not issue an application-level
+    # HTTPS redirect: some ingress proxies forward HTTP without a reliable
+    # X-Forwarded-Proto header, which otherwise creates an infinite 307 loop.
+    # The ingress must enforce HTTPS for all public traffic.
     app.add_middleware(_HSTSMiddleware)
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.proxy_hosts)
-
