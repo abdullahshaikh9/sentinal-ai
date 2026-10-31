@@ -41,6 +41,49 @@ reject unexpected host, port, database, or TiDB TLS settings and never print
 credentials. `migrate` uses a database advisory lock and refuses unexpected
 Alembic revisions; it is not an image-build command.
 
+## First-time empty production initialization
+
+The ordinary guarded migration intentionally refuses an empty schema. For a
+new, verified production database only, use this separate manual command from
+a controlled runtime job after explicit approval:
+
+```text
+python -m app.migration_release --confirm-production-target --initialize-empty-production
+```
+
+The runtime must provide `DATABASE_URL` resolving exactly to the approved TiDB
+host, port, and `sentinel_ai` database, plus a readable
+`DATABASE_SSL_CA_PATH`. The application must pass both TLS certificate and
+hostname verification; `DATABASE_CONNECT_TIMEOUT_SECONDS` remains bounded by
+normal settings validation. The command never prints the URL or any
+credential.
+
+Before invoking Alembic, the initializer acquires the existing migration
+advisory lock and verifies `SELECT DATABASE()` is `sentinel_ai`, then inspects
+all tables and views and checks Alembic heads. It refuses any existing table,
+view, or revision, including `alembic_version`. It then runs the real Alembic
+upgrade chain from base through `20261030_0010`; it does not stamp a revision
+and never runs automatically during image builds, release startup, or web
+worker startup.
+
+Preparation and recovery requirements:
+
+1. Obtain an approved consistent backup and verify it can be restored to an
+   isolated database. Record the backup location and checksum without putting
+   credentials in command arguments or logs.
+2. Confirm the target identity and empty-schema results with read-only SQL and
+   obtain explicit approval for initialization.
+3. Run the command once from a single controlled runtime process. Do not run
+   it concurrently with another migration or application deployment.
+4. Verify `20261030_0010`, all required tables, indexes, and the server-reported
+   database identity with `production_db_ops verify` and the protected
+   diagnostic flow.
+5. If Alembic reports a failure, stop. The initializer performs no destructive
+   cleanup; MySQL-compatible DDL may be non-transactional. Inspect the actual
+   tables and revision before any retry, preserve the partial state, and obtain
+   a reviewed repair plan. Never drop, truncate, recreate, downgrade, or stamp
+   to bypass the failure.
+
 ## Temporary read-only diagnostic endpoint
 
 The HTTP diagnostic flow is disabled by default. To enable it temporarily in
