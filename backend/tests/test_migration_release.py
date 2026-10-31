@@ -177,3 +177,21 @@ def test_build_configuration_does_not_execute_migrations() -> None:
     assert "migration_release" not in nixpacks
     assert "uvicorn" in procfile
     assert "uvicorn" in nixpacks
+
+
+def test_github_initializer_workflow_is_manual_and_guarded() -> None:
+    workflow = (Path(__file__).parents[2] / ".github" / "workflows" / "initialize-production-db.yml").read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert "environment:\n      name: production-db-init" in workflow
+    assert "group: sentinel-ai-production-db-init" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "python-version: '3.11.9'" in workflow
+    assert "secrets.DATABASE_URL" in workflow
+    assert "secrets.DATABASE_SSL_CA_PATH" in workflow
+    assert "secrets.TIDB_CA_PEM" in workflow
+    assert "python -m app.migration_release --confirm-production-target --initialize-empty-production" in workflow
+    assert "alembic stamp" not in workflow.lower()
+    assert "push:" not in workflow
+    assert "pull_request:" not in workflow
+    assert "schedule:" not in workflow

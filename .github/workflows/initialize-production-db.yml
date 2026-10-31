@@ -1,0 +1,85 @@
+name: Initialize empty production database
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sentinel-ai-production-db-init
+  cancel-in-progress: false
+
+jobs:
+  initialize:
+    name: Verify and initialize empty TiDB schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production-db-init
+    steps:
+      - name: Check out reviewed code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.11.9'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Materialize protected TiDB CA file
+        env:
+          CA_FILE_NAME: ${{ secrets.DATABASE_SSL_CA_PATH }}
+          CA_PEM: ${{ secrets.TIDB_CA_PEM }}
+        run: |
+          set -eu
+          if [ -z "${CA_FILE_NAME:-}" ] || [ -z "${CA_PEM:-}" ]; then
+            echo "Required production database CA secrets are not configured." >&2
+            exit 1
+          fi
+          case "$CA_FILE_NAME" in
+            */*|*\\*|.*|*..*)
+              echo "DATABASE_SSL_CA_PATH must be a simple protected CA filename." >&2
+              exit 1
+              ;;
+          esac
+          ca_path="$RUNNER_TEMP/$CA_FILE_NAME"
+          umask 077
+          CA_PATH="$ca_path" python - <<'PY'
+          import os
+          from pathlib import Path
+
+          Path(os.environ["CA_PATH"]).write_text(os.environ["CA_PEM"], encoding="utf-8")
+          PY
+          printf 'DATABASE_SSL_CA_PATH=%s\n' "$ca_path" >> "$GITHUB_ENV"
+
+      - name: Read-only production target preflight
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -eu
+          python - <<'PY'
+          from app.config import Settings
+          from app.migration_release import _verify_empty_schema, _validate_initialization_target
+          from sqlalchemy import create_engine
+          from sqlalchemy.pool import NullPool
+
+          settings = Settings()
+          _validate_initialization_target(settings, confirmed=True, initialize_empty=True)
+          engine = create_engine(settings.database_url, connect_args=settings.database_connect_args, poolclass=NullPool)
+          with engine.connect() as connection:
+              _verify_empty_schema(connection)
+          print("Read-only production target and empty-schema preflight passed.")
+          PY
+
+      - name: Initialize empty production schema
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m app.migration_release --confirm-production-target --initialize-empty-production
