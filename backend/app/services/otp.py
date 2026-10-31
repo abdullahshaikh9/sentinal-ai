@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import base64
+from dataclasses import dataclass
 from email.utils import formataddr, parseaddr
 import hashlib
 import hmac
 import logging
+import re
 import secrets
+import ssl
 import smtplib
 import sys
 from email.message import EmailMessage
@@ -24,6 +27,23 @@ from app.models import OtpChallenge, OtpSendAttempt, PasswordResetChallenge, Use
 console_sms_logger = logging.getLogger("sentinel.otp.sms.console")
 delivery_logger = logging.getLogger("sentinel.otp.delivery")
 _CONSOLE_SMS_HANDLER_MARKER = "_sentinel_console_sms_terminal"
+_GMAIL_SMTP_HOSTS = {"smtp.gmail.com", "smtp.googlemail.com"}
+_SMTP_ADDRESS_PATTERN = re.compile(r"^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$")
+
+
+@dataclass(frozen=True)
+class SmtpConfiguration:
+    """Validated, non-sensitive SMTP configuration status."""
+
+    provider: str
+    host_present: bool
+    port: int | None
+    username_present: bool
+    password_present: bool
+    sender_valid: bool
+    tls_enabled: bool
+    configured: bool
+    reason: str
 
 
 class OtpDeliveryError(RuntimeError):
@@ -50,15 +70,69 @@ def normalize_phone(phone_number: str) -> str:
     return "".join(phone_number.split()).replace("(", "").replace(")", "").replace("-", "")
 
 
-def email_provider_configured(settings: Settings) -> bool:
-    smtp_auth_configured = bool(settings.smtp_username and settings.smtp_password)
-    smtp_auth_partial = bool(settings.smtp_username) != bool(settings.smtp_password)
-    return bool(
-        settings.email_provider.lower() == "smtp"
-        and all((settings.smtp_host, settings.smtp_from, settings.otp_pepper))
-        and not smtp_auth_partial
-        and (not settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"} or smtp_auth_configured)
+def smtp_configuration_status(settings: Settings) -> SmtpConfiguration:
+    """Return SMTP readiness without exposing hostnames or credential values."""
+    provider = str(settings.email_provider or "").strip().lower()
+    host = str(settings.smtp_host or "").strip()
+    username = str(settings.smtp_username or "").strip()
+    password = str(settings.smtp_password or "").strip()
+    sender = str(settings.smtp_from or "").strip()
+    port = settings.smtp_port if isinstance(settings.smtp_port, int) and not isinstance(settings.smtp_port, bool) else None
+    parsed_sender = parseaddr(sender)[1]
+    sender_valid = bool(_SMTP_ADDRESS_PATTERN.fullmatch(parsed_sender))
+    host_present = bool(host)
+    username_present = bool(username)
+    password_present = bool(password)
+    tls_enabled = settings.smtp_use_tls is True
+    reason = "configured"
+
+    if provider != "smtp":
+        reason = "EMAIL_PROVIDER must be smtp"
+    elif not host_present:
+        reason = "SMTP_HOST is missing"
+    elif port is None or not 1 <= port <= 65535:
+        reason = "SMTP_PORT must be between 1 and 65535"
+    elif not sender_valid:
+        reason = "SMTP_FROM is invalid"
+    elif not tls_enabled:
+        reason = "SMTP_USE_TLS must be true"
+    elif username_present != password_present:
+        reason = "SMTP_USERNAME and SMTP_PASSWORD must be provided together"
+    elif host.lower() in _GMAIL_SMTP_HOSTS and not (username_present and password_present):
+        reason = "Gmail SMTP requires SMTP_USERNAME and SMTP_PASSWORD"
+
+    return SmtpConfiguration(
+        provider=provider,
+        host_present=host_present,
+        port=port,
+        username_present=username_present,
+        password_present=password_present,
+        sender_valid=sender_valid,
+        tls_enabled=tls_enabled,
+        configured=reason == "configured",
+        reason=reason,
     )
+
+
+def log_smtp_configuration(settings: Settings) -> SmtpConfiguration:
+    """Log only safe SMTP readiness metadata at application startup."""
+    status = smtp_configuration_status(settings)
+    delivery_logger.info(
+        "SMTP configuration provider=%s host_present=%s port=%s username_present=%s password_present=%s sender_valid=%s tls_enabled=%s validation=%s",
+        status.provider or "none",
+        status.host_present,
+        status.port if status.port is not None else "invalid",
+        status.username_present,
+        status.password_present,
+        status.sender_valid,
+        status.tls_enabled,
+        "ok" if status.configured else status.reason,
+    )
+    return status
+
+
+def email_provider_configured(settings: Settings) -> bool:
+    return smtp_configuration_status(settings).configured
 
 
 def sms_provider_configured(settings: Settings) -> bool:
@@ -79,12 +153,11 @@ def providers_configured(settings: Settings) -> bool:
 def configuration_message(settings: Settings) -> str:
     if not settings.otp_pepper:
         return "OTP verification is unavailable until OTP_PEPPER is configured."
-    if settings.email_provider.lower() != "smtp" or not all((settings.smtp_host, settings.smtp_from)):
+    smtp_status = smtp_configuration_status(settings)
+    if not smtp_status.configured:
+        if smtp_status.reason in {"SMTP_USERNAME and SMTP_PASSWORD must be provided together", "Gmail SMTP requires SMTP_USERNAME and SMTP_PASSWORD"}:
+            return "Email verification is unavailable until both SMTP_USERNAME and SMTP_PASSWORD are configured."
         return "Email verification is unavailable until the SMTP provider is configured."
-    smtp_auth_configured = bool(settings.smtp_username and settings.smtp_password)
-    smtp_auth_partial = bool(settings.smtp_username) != bool(settings.smtp_password)
-    if smtp_auth_partial or (settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"} and not smtp_auth_configured):
-        return "Email verification is unavailable until both SMTP_USERNAME and SMTP_PASSWORD are configured."
     sms_provider = settings.sms_provider.lower()
     if sms_provider == "console" and settings.app_env.lower() != "development":
         return "SMS_PROVIDER=console is only permitted when APP_ENV=development."
@@ -172,11 +245,10 @@ def verify_password_reset_code(challenge: PasswordResetChallenge, code: str, set
 
 
 def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
-    if settings.email_provider.lower() != "smtp" or not settings.smtp_host or not settings.smtp_from:
-        raise RuntimeError("Email verification provider is not configured.")
-    _, sender_email = parseaddr(settings.smtp_from.strip())
-    if not sender_email or "@" not in sender_email:
-        raise RuntimeError("SMTP_FROM must contain the configured sender email address.")
+    smtp_status = smtp_configuration_status(settings)
+    if not smtp_status.configured:
+        raise RuntimeError(f"Email verification provider is not configured: {smtp_status.reason}.")
+    sender_email = parseaddr(str(settings.smtp_from).strip())[1]
     message = EmailMessage()
     message["From"] = formataddr(("Sentinel AI", sender_email))
     message["To"] = user.email
@@ -188,24 +260,20 @@ def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
         "If you did not request this code, you can ignore this message.\n\n"
         "— Sentinel AI Security Team"
     )
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.sms_timeout_seconds) as server:
-        if settings.smtp_use_tls:
-            server.starttls()
+    with smtplib.SMTP(str(settings.smtp_host).strip(), settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
+        server.starttls(context=ssl.create_default_context())
         if settings.smtp_username and settings.smtp_password:
-            password = settings.smtp_password
-            if settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"}:
-                password = "".join(password.split())
-            server.login(settings.smtp_username, password)
+            password = "".join(settings.smtp_password.split()) if str(settings.smtp_host).strip().lower() in _GMAIL_SMTP_HOSTS else settings.smtp_password
+            server.login(str(settings.smtp_username).strip(), password)
         server.send_message(message)
 
 
 def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> None:
     """Send a reset-only OTP without logging its value or a reset capability."""
-    if not email_provider_configured(settings):
-        raise RuntimeError("Email delivery provider is not configured.")
-    _, sender_email = parseaddr(settings.smtp_from.strip())
-    if not sender_email or "@" not in sender_email:
-        raise RuntimeError("SMTP_FROM must contain the configured sender email address.")
+    smtp_status = smtp_configuration_status(settings)
+    if not smtp_status.configured:
+        raise RuntimeError(f"Email delivery provider is not configured: {smtp_status.reason}.")
+    sender_email = parseaddr(str(settings.smtp_from).strip())[1]
     message = EmailMessage()
     message["From"] = formataddr(("Sentinel AI", sender_email))
     message["To"] = user.email
@@ -217,12 +285,11 @@ def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> Non
         "If you did not request a password reset, you can ignore this message.\n\n"
         "— Sentinel AI Security Team"
     )
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.sms_timeout_seconds) as server:
-        if settings.smtp_use_tls:
-            server.starttls()
+    with smtplib.SMTP(str(settings.smtp_host).strip(), settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
+        server.starttls(context=ssl.create_default_context())
         if settings.smtp_username and settings.smtp_password:
-            password = "".join(settings.smtp_password.split()) if settings.smtp_host.lower() in {"smtp.gmail.com", "smtp.googlemail.com"} else settings.smtp_password
-            server.login(settings.smtp_username, password)
+            password = "".join(settings.smtp_password.split()) if str(settings.smtp_host).strip().lower() in _GMAIL_SMTP_HOSTS else settings.smtp_password
+            server.login(str(settings.smtp_username).strip(), password)
         server.send_message(message)
 
 

@@ -1,11 +1,13 @@
 from pathlib import Path
+import smtplib
+from types import SimpleNamespace
 
 import pytest
 
 from app.config import BACKEND_DIR, Settings
 from app.models import User
 from app.services import otp
-from app.services.otp import configuration_message, deliver, deliver_email_otp, deliver_sms_otp, providers_configured
+from app.services.otp import configuration_message, deliver, deliver_email_otp, deliver_sms_otp, email_provider_configured, providers_configured, smtp_configuration_status
 
 
 def _provider_environment(monkeypatch) -> None:
@@ -40,6 +42,62 @@ def test_missing_otp_secret_fails_safely(monkeypatch) -> None:
     assert settings.otp_pepper is None
     assert not providers_configured(settings)
     assert configuration_message(settings) == "OTP verification is unavailable until OTP_PEPPER is configured."
+
+
+def test_smtp_readiness_is_independent_from_otp_pepper() -> None:
+    settings = Settings(_env_file=None, email_provider="smtp", smtp_host="smtp.example.test", smtp_from="sender@example.test", otp_pepper=None)
+
+    assert email_provider_configured(settings)
+    assert smtp_configuration_status(settings).configured
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"smtp_host": None}, "SMTP_HOST is missing"),
+        ({"smtp_username": "sender@example.test"}, "SMTP_USERNAME and SMTP_PASSWORD must be provided together"),
+        ({"smtp_password": "password"}, "SMTP_USERNAME and SMTP_PASSWORD must be provided together"),
+        ({"smtp_from": "not-an-email"}, "SMTP_FROM is invalid"),
+        ({"smtp_port": 70000}, "SMTP_PORT must be between 1 and 65535"),
+        ({"smtp_use_tls": False}, "SMTP_USE_TLS must be true"),
+    ],
+)
+def test_smtp_configuration_rejects_invalid_required_values(overrides, reason) -> None:
+    values = {
+        "email_provider": "smtp",
+        "smtp_host": "smtp.example.test",
+        "smtp_from": "sender@example.test",
+        "smtp_port": 587,
+        "smtp_username": None,
+        "smtp_password": None,
+        "smtp_use_tls": True,
+    }
+    values.update(overrides)
+    if values["smtp_port"] == 70000:
+        settings = SimpleNamespace(**values)
+    else:
+        settings = Settings(_env_file=None, **values)
+
+    status = smtp_configuration_status(settings)
+    assert not status.configured
+    assert status.reason == reason
+
+
+def test_environment_smtp_values_are_loaded_by_settings(monkeypatch) -> None:
+    monkeypatch.setenv("EMAIL_PROVIDER", "smtp")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.test")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_FROM", "sender@example.test")
+    monkeypatch.setenv("SMTP_USE_TLS", "true")
+    monkeypatch.setenv("SMTP_TIMEOUT_SECONDS", "12")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.email_provider == "smtp"
+    assert settings.smtp_host == "smtp.example.test"
+    assert settings.smtp_port == 587
+    assert settings.smtp_timeout_seconds == 12
+    assert smtp_configuration_status(settings).configured
 
 
 def test_settings_use_the_backend_env_file_for_diagnostics_and_routes() -> None:
@@ -242,7 +300,8 @@ def test_email_from_name_subject_and_expiry_copy_keep_configured_sender(monkeypa
         def __exit__(self, *_args) -> None:
             return None
 
-        def starttls(self) -> None:
+        def starttls(self, *, context) -> None:
+            assert context is not None
             pass
 
         def send_message(self, message) -> None:
@@ -280,7 +339,7 @@ def test_gmail_app_password_formatting_is_normalized_without_logging_credentials
         def __init__(self, host: str, port: int, timeout: float) -> None:
             assert host == "smtp.gmail.com"
             assert port == 587
-            assert timeout == 10.0
+            assert timeout == 15.0
 
         def __enter__(self):
             return self
@@ -288,7 +347,8 @@ def test_gmail_app_password_formatting_is_normalized_without_logging_credentials
         def __exit__(self, *_args) -> None:
             return None
 
-        def starttls(self) -> None:
+        def starttls(self, *, context) -> None:
+            assert context is not None
             pass
 
         def login(self, username: str, password: str) -> None:
@@ -304,3 +364,63 @@ def test_gmail_app_password_formatting_is_normalized_without_logging_credentials
     deliver_email_otp(User(id=8, email="recipient@test.invalid"), "123456", settings)
 
     assert captured == {"username": "sender@gmail.test", "password": "abcdefghijklmnop"}
+
+
+@pytest.mark.parametrize("failure", [smtplib.SMTPAuthenticationError(535, b"authentication failed"), TimeoutError("timed out")])
+def test_smtp_delivery_failures_are_wrapped_without_secret_logs(monkeypatch, caplog, failure) -> None:
+    class FailedSMTP:
+        def __init__(self, *_args, **_kwargs):
+            if isinstance(failure, TimeoutError):
+                raise failure
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def starttls(self, *, context):
+            raise failure
+
+    monkeypatch.setattr(otp.smtplib, "SMTP", FailedSMTP)
+    settings = Settings(_env_file=None, email_provider="smtp", smtp_host="smtp.example.test", smtp_from="sender@example.test", smtp_username="private-user", smtp_password="private-password", otp_pepper="private-pepper")
+
+    with pytest.raises(otp.OtpDeliveryError):
+        deliver("email", User(id=23, email="recipient@example.test"), "583104", settings)
+    otp.log_delivery_failure("email", settings, otp.OtpDeliveryError("email OTP delivery failed."))
+
+    assert "private-user" not in caplog.text
+    assert "private-password" not in caplog.text
+    assert "private-pepper" not in caplog.text
+    assert "583104" not in caplog.text
+
+
+def test_successful_smtp_delivery_uses_tls_and_configured_timeout(monkeypatch) -> None:
+    captured = {}
+
+    class SuccessfulSMTP:
+        def __init__(self, host, port, timeout):
+            captured.update(host=host, port=port, timeout=timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def starttls(self, *, context):
+            captured["tls_context"] = context
+
+        def send_message(self, message):
+            captured["recipient"] = message["To"]
+
+    monkeypatch.setattr(otp.smtplib, "SMTP", SuccessfulSMTP)
+    settings = Settings(_env_file=None, email_provider="smtp", smtp_host="smtp.example.test", smtp_from="sender@example.test", smtp_timeout_seconds=9, otp_pepper="private-pepper")
+
+    deliver_email_otp(User(id=24, email="recipient@example.test"), "583104", settings)
+
+    assert captured["host"] == "smtp.example.test"
+    assert captured["port"] == 587
+    assert captured["timeout"] == 9
+    assert captured["tls_context"] is not None
+    assert captured["recipient"] == "recipient@example.test"

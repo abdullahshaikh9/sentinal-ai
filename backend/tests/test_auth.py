@@ -168,6 +168,31 @@ def test_registration_requires_real_delivery_and_never_returns_otp(client) -> No
         assert db.scalar(select(User).where(User.email == "unconfigured@example.test")) is None
 
 
+def test_registration_reports_smtp_configuration_failure_without_creating_user(client, monkeypatch) -> None:
+    test_client, factory, _ = client
+    monkeypatch.setattr(
+        routes,
+        "get_settings",
+        lambda: Settings(
+            _env_file=None,
+            otp_pepper="configured-but-missing-smtp",
+            email_provider="smtp",
+            smtp_from="sender@example.test",
+            sms_provider="twilio",
+            sms_account_sid="ACtest",
+            sms_auth_token="test-token",
+            sms_from_number="+15550000000",
+        ),
+    )
+
+    response = test_client.post("/api/v1/auth/register", json={"email": "smtp-unavailable@example.test", "display_name": "Test User", "phone_number": "+15551234566", "password": "StrongPassword123"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Email verification is unavailable until the SMTP provider is configured."
+    with factory() as db:
+        assert db.scalar(select(User).where(User.email == "smtp-unavailable@example.test")) is None
+
+
 def test_duplicate_registration_is_rejected_without_delivery(client, monkeypatch) -> None:
     test_client, _, delivered = client
     _register(test_client, "duplicate@example.test", delivered)

@@ -10,9 +10,11 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from app.api.routes import router
 from app.config import get_settings
 from app.db import database_error_category
+from app.services.otp import log_smtp_configuration
 
 settings = get_settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+log_smtp_configuration(settings)
 app = FastAPI(title=settings.app_name, version="0.1.0", description="Evidence-based website security assessment platform")
 
 

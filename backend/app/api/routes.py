@@ -319,8 +319,11 @@ def request_password_reset(
     db: Session = Depends(get_db),
 ) -> PasswordResetPendingResponse:
     settings = get_settings()
+    if not settings.otp_pepper:
+        auth_delivery_logger.error("Password reset unavailable reason=missing_otp_pepper")
+        raise HTTPException(status_code=503, detail="Password reset is unavailable until OTP_PEPPER is configured.")
     if not email_provider_configured(settings):
-        auth_delivery_logger.error("Password reset email delivery unavailable email_provider=%s", settings.email_provider)
+        auth_delivery_logger.error("Password reset email delivery unavailable provider=%s", settings.email_provider.strip().lower())
         raise HTTPException(status_code=503, detail="Email verification is unavailable until the SMTP provider is configured.")
 
     email = normalize_email(payload.email)

@@ -40,11 +40,12 @@ class Settings(BaseSettings):
     otp_max_sends_per_ip_per_hour: int = 10
     email_provider: str = "none"
     smtp_host: str | None = None
-    smtp_port: int = 587
+    smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str | None = None
     smtp_password: str | None = None
     smtp_from: str | None = None
     smtp_use_tls: bool = True
+    smtp_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
     sms_provider: str = "none"
     sms_account_sid: str | None = None
     sms_auth_token: str | None = None
