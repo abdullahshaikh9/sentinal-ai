@@ -1,5 +1,6 @@
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 
 from app.config import Settings
 from app import db
@@ -113,6 +114,50 @@ def test_tidb_requires_a_readable_ca_certificate(tmp_path) -> None:
 def test_local_mysql_configuration_remains_unchanged() -> None:
     settings = Settings(_env_file=None, database_url="mysql+pymysql://user:password@127.0.0.1:3306/sentinel_ai")
     assert settings.database_connect_args == {"connect_timeout": 10, "read_timeout": 10, "write_timeout": 10}
+
+
+def test_ethiodeploy_mysql_without_custom_ca_keeps_connection_configuration_optional() -> None:
+    settings = Settings(
+        _env_file=None,
+        database_url="mysql+pymysql://user:password@mysql-addon.internal:3306/ethiodeploy",
+    )
+
+    assert settings.database_connect_args == {
+        "connect_timeout": 10,
+        "read_timeout": 10,
+        "write_timeout": 10,
+    }
+
+
+def test_ethiodeploy_mysql_custom_ca_is_passed_with_verification(tmp_path) -> None:
+    certificate = tmp_path / "ethiodeploy-ca.pem"
+    certificate.write_text("test certificate", encoding="utf-8")
+    settings = Settings(
+        _env_file=None,
+        database_url="mysql+pymysql://user:password@mysql-addon.internal:3306/ethiodeploy",
+        database_ssl_ca_path=str(certificate),
+    )
+
+    assert settings.database_connect_args["ssl_ca"] == str(certificate)
+    assert settings.database_connect_args["ssl_verify_cert"] is True
+    assert settings.database_connect_args["ssl_verify_identity"] is True
+
+
+def test_ethiodeploy_mysql_missing_or_invalid_ca_is_rejected(tmp_path) -> None:
+    url = "mysql+pymysql://user:password@mysql-addon.internal:3306/ethiodeploy"
+    with pytest.raises(ValidationError, match="readable CA certificate"):
+        Settings(_env_file=None, database_url=url, database_ssl_ca_path=str(tmp_path / "missing.pem"))
+
+    invalid_path = tmp_path / "directory"
+    invalid_path.mkdir()
+    with pytest.raises(ValidationError, match="readable CA certificate"):
+        Settings(_env_file=None, database_url=url, database_ssl_ca_path=str(invalid_path))
+
+
+def test_database_connection_failure_is_sanitized() -> None:
+    error = OperationalError("connect", {}, OSError("certificate details and password must not escape"))
+
+    assert db.database_error_category(error) == "tls_error"
 
 
 def test_diagnostic_feature_requires_a_high_entropy_secret() -> None:

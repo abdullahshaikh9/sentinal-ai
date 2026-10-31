@@ -156,6 +156,16 @@ verification, or use a URL option that bypasses hostname verification. The
 Nixpacks configuration does not download or create this CA file, so the hosting
 deployment must provide it before the backend starts.
 
+For other MySQL providers, including an EthioDeploy MySQL add-on, the code does
+not require a custom CA merely because the URL uses MySQL. `DATABASE_SSL_CA_PATH`
+is optional unless the provider supplies a CA that must be configured. If it is
+set, it must point to a readable certificate and PyMySQL receives both
+certificate and hostname verification. EthioDeploy's public add-on
+documentation confirms an internal managed MySQL 8 instance and automatic
+`DATABASE_URL` injection, but does not document a custom CA filename or a
+provider-specific TLS requirement; do not reuse a TiDB CA without confirming it
+with EthioDeploy.
+
 ## Failed-login throttling
 
 Failed-login events are stored in the configured application database under
