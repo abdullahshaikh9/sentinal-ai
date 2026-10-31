@@ -36,6 +36,21 @@ def test_source_target_cannot_be_tidb(monkeypatch) -> None:
         _source_engine()
 
 
+def test_source_url_is_not_required_for_normal_module_import(monkeypatch) -> None:
+    monkeypatch.delenv("IMPORT_SOURCE_DATABASE_URL", raising=False)
+
+    import app.production_import as production_import
+
+    assert production_import.IMPORT_TABLES
+
+
+def test_explicit_source_engine_requires_source_url(monkeypatch) -> None:
+    monkeypatch.delenv("IMPORT_SOURCE_DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="IMPORT_SOURCE_DATABASE_URL is required"):
+        _source_engine()
+
+
 def test_diagnostic_challenge_is_single_use_and_replay_protected() -> None:
     manager = DiagnosticChallengeManager()
     challenge = manager.issue("client", "diagnostic-secret", "diagnostic-secret", 60, 5)
