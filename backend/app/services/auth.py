@@ -239,8 +239,8 @@ def require_csrf_read_only(request: Request, session: AuthSession = Depends(get_
 
 def set_auth_cookies(response, raw_token: str, raw_csrf: str) -> None:
     settings = get_settings()
-    response.set_cookie(settings.auth_cookie_name, raw_token, httponly=True, secure=settings.secure_auth_cookies, samesite="lax", max_age=settings.session_ttl_minutes * 60, path="/")
-    response.set_cookie(settings.csrf_cookie_name, raw_csrf, httponly=False, secure=settings.secure_auth_cookies, samesite="lax", max_age=settings.session_ttl_minutes * 60, path="/")
+    response.set_cookie(settings.auth_cookie_name, raw_token, httponly=True, secure=settings.secure_auth_cookies, samesite="none" if settings.secure_auth_cookies else "lax", max_age=settings.session_ttl_minutes * 60, path="/")
+    response.set_cookie(settings.csrf_cookie_name, raw_csrf, httponly=False, secure=settings.secure_auth_cookies, samesite="none" if settings.secure_auth_cookies else "lax", max_age=settings.session_ttl_minutes * 60, path="/")
 
 
 def clear_auth_cookies(response) -> None:
