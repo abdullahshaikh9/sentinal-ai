@@ -19,7 +19,7 @@ from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, Ad
 from app.services.activity import record_event
 from app.services.ai import AIProviderError, AIRateLimitError, MAX_CONTEXT_FINDINGS, assistant_http_error, ask_provider, build_context, check_rate_limit, configuration_message, provider_context_budget, provider_is_configured, provider_name
 from app.services.guidance import build_defensive_guidance
-from app.services.auth import clear_auth_cookies, clear_login_failures, create_session, finalize_login_attempt, get_current_user, get_current_user_read_only, hash_password, normalize_email, require_csrf, require_csrf_read_only, reserve_login_attempt, set_auth_cookies, verify_password
+from app.services.auth import clear_auth_cookies, clear_login_failures, create_session, finalize_login_attempt, get_current_session_read_only, get_current_user, get_current_user_read_only, hash_password, normalize_email, require_csrf, require_csrf_read_only, reserve_login_attempt, set_auth_cookies, verify_password
 from app.services.otp import OtpSendRateLimitError, check_send_cooldown, check_send_rate_limits, configuration_message as otp_configuration_message, create_challenge, create_password_reset_challenge, deliver, deliver_password_reset_otp, email_provider_configured, get_challenge, log_delivery_failure, normalize_phone, providers_configured, record_send_attempts, sms_provider_configured, verify_code, verify_password_reset_code
 from app.services.reports import build_scan_pdf
 from app.services.scanning.jobs import execute_scan
@@ -273,6 +273,15 @@ def resend_otp(payload: OtpResendRequest, request: Request, db: Session = Depend
         log_delivery_failure(payload.channel, settings, exc)
         raise HTTPException(status_code=503, detail="Verification delivery is temporarily unavailable. Check the backend delivery logs and try again.") from exc
     return {"message": "The verification message was accepted by the configured provider.", "resend_after_seconds": settings.otp_resend_cooldown_seconds}
+
+
+@router.get("/auth/csrf", tags=["auth"])
+def get_csrf_token(request: Request, session: AuthSession = Depends(get_current_session_read_only)) -> dict[str, str]:
+    """Expose the session-bound CSRF token to the explicitly allowed frontend origin."""
+    csrf = request.cookies.get(get_settings().csrf_cookie_name)
+    if not csrf or not secrets.compare_digest(hashlib.sha256(csrf.encode()).hexdigest(), session.csrf_token_hash):
+        raise HTTPException(status_code=403, detail="CSRF cookie is missing or invalid.")
+    return {"csrf_token": csrf}
 
 
 @router.get("/auth/me", response_model=UserRead, tags=["auth"])
