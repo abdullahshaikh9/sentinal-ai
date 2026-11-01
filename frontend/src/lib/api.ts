@@ -67,7 +67,15 @@ function responseErrorMessage(payload: unknown, status: number): string {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
-  const csrf = document.cookie.match(/(?:^|; )sentinel_csrf=([^;]+)/)?.[1];
+  let csrf = document.cookie.match(/(?:^|; )sentinel_csrf=([^;]+)/)?.[1];
+  const method = (init?.method ?? "GET").toUpperCase();
+  const publicPaths = ["/auth/login", "/auth/register", "/auth/verify-otp", "/auth/resend-otp", "/auth/forgot-password", "/auth/request-reset", "/auth/verify-reset-code", "/auth/verify-reset-otp", "/auth/reset-password"];
+  if (!csrf && !["GET", "HEAD", "OPTIONS"].includes(method) && !publicPaths.includes(path)) {
+    const tokenResponse = await fetch(`${apiBaseUrl}/auth/csrf`, { credentials: "include" });
+    if (!tokenResponse.ok) throw new ApiError(403, "Security session could not be verified. Please sign in again.");
+    const tokenData: { csrf_token: string } = await tokenResponse.json();
+    csrf = tokenData.csrf_token;
+  }
   try {
     response = await fetch(`${apiBaseUrl}${path}`, { ...init, credentials: "include", headers: { ...init?.headers, ...(csrf ? { "X-CSRF-Token": decodeURIComponent(csrf) } : {}) } });
   } catch {
