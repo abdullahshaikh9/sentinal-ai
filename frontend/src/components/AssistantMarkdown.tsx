@@ -19,9 +19,9 @@ function renderInline(value: string, keyPrefix: string): ReactNode[] {
     const token = match[0];
     const key = `${keyPrefix}-${match.index}`;
     if (token.startsWith("`")) {
-      nodes.push(<code key={key} className="rounded bg-slate-200 px-1 py-0.5 font-mono text-[0.9em]">{token.slice(1, -1)}</code>);
+      nodes.push(<code key={key} className="rounded bg-white/10 px-1 py-0.5 font-mono text-[0.9em] text-inherit">{token.slice(1, -1)}</code>);
     } else if (token.startsWith("**") || token.startsWith("__")) {
-      nodes.push(<strong key={key} className="font-semibold text-slate-800">{renderInline(token.slice(2, -2), key)}</strong>);
+      nodes.push(<strong key={key} className="font-semibold text-inherit">{renderInline(token.slice(2, -2), key)}</strong>);
     } else {
       nodes.push(<em key={key}>{renderInline(token.slice(1, -1), key)}</em>);
     }
@@ -67,7 +67,7 @@ export function AssistantMarkdown({ content }: { content: string }) {
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading) {
       const level = heading[1].length;
-      const className = "font-semibold text-ink";
+      const className = "font-semibold text-inherit";
       const children = renderInline(heading[2], `heading-${blocks.length}`);
       if (level === 1) blocks.push(<h1 key={`h-${blocks.length}`} className={`text-xl ${className}`}>{children}</h1>);
       else if (level === 2) blocks.push(<h2 key={`h-${blocks.length}`} className={`text-lg ${className}`}>{children}</h2>);
