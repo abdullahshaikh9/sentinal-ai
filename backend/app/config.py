@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     otp_max_sends_per_ip_per_hour: int = 10
     email_provider: str = "none"
     resend_api_key: str | None = None
+    gmail_client_id: str | None = None
+    gmail_client_secret: str | None = None
+    gmail_refresh_token: str | None = None
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str | None = None
