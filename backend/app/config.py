@@ -3,7 +3,7 @@ import ipaddress
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     database_ssl_ca_path: str | None = None
     database_connect_timeout_seconds: int = Field(default=10, ge=1, le=60)
     api_v1_prefix: str = "/api/v1"
-    allowed_origins: str = "http://localhost:5173,http://localhost:5174,http://localhost:5175"
+    allowed_origins: str = Field(default="http://localhost:5173,http://localhost:5174,http://localhost:5175", validation_alias=AliasChoices("ALLOWED_ORIGINS", "CORS_ORIGINS"))
     trusted_proxy_hosts: str = "127.0.0.1,::1"
     ai_provider: str = "none"
     ai_api_key: str | None = None
