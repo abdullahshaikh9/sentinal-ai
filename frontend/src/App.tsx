@@ -1,5 +1,5 @@
 import { lazy, Suspense } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { HashRouter, Route, Routes } from "react-router-dom";
 import { LoaderCircle } from "lucide-react";
 import { AuthProvider, RequireAuth } from "./auth/AuthContext";
 import { AppLayout } from "./layout/AppLayout";
@@ -38,7 +38,7 @@ function RouteLoadingFallback() {
 
 export function App() {
   return (
-    <BrowserRouter>
+    <HashRouter>
       <AuthProvider>
         <Suspense fallback={<RouteLoadingFallback />}>
           <Routes>
@@ -68,7 +68,7 @@ export function App() {
           </Routes>
         </Suspense>
       </AuthProvider>
-    </BrowserRouter>
+    </HashRouter>
   );
 }
 
