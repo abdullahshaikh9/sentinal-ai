@@ -1,6 +1,6 @@
 import type { ActivityEvent, AdminActivity, AdminAssets, AdminFinding, AdminFindings, AdminHealth, AdminOverview, AdminUser, AdminUsers, Asset, AssetOverview, AssistantResponse, AssistantStatus, AssistantTurn, DashboardOverview, FindingDetail, FindingOverviewItem, HealthResponse, Notification, RemediationChange, RemediationItem, RemediationStatus, ReportHistory, Scan, ScanComparison, ScanDetail, ScanList, SearchResult, User, VerificationAttempt, VerificationOverviewItem } from "../types";
 
-export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL ?? "/api/v1";
+export const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || (typeof window !== "undefined" && window.location.hostname === "sentinal-ai-frontend-ltvn.onrender.com" ? "https://sentinal-ai-upoi.onrender.com/api/v1" : "/api/v1");
 
 export class ApiError extends Error {
   constructor(public readonly status: number, message: string) {
@@ -70,7 +70,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let csrf = document.cookie.match(/(?:^|; )sentinel_csrf=([^;]+)/)?.[1];
   const method = (init?.method ?? "GET").toUpperCase();
   const publicPaths = ["/auth/login", "/auth/register", "/auth/verify-otp", "/auth/resend-otp", "/auth/forgot-password", "/auth/request-reset", "/auth/verify-reset-code", "/auth/verify-reset-otp", "/auth/reset-password"];
-  if (!csrf && !["GET", "HEAD", "OPTIONS"].includes(method) && !publicPaths.includes(path)) {
+  // On separate Render origins, the browser cannot read the backend domain cookie.
+  // Fetch the session-bound token from the API for every authenticated mutation.
+  if (!["GET", "HEAD", "OPTIONS"].includes(method) && !publicPaths.includes(path) && (apiBaseUrl.startsWith("http") || !csrf)) {
     const tokenResponse = await fetch(`${apiBaseUrl}/auth/csrf`, { credentials: "include" });
     if (!tokenResponse.ok) throw new ApiError(403, "Security session could not be verified. Please sign in again.");
     const tokenData: { csrf_token: string } = await tokenResponse.json();
