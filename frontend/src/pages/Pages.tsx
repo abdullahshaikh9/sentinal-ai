@@ -135,7 +135,7 @@ export function AssetsPage() {
     event.preventDefault();
     if (!authorized || saving) { if (!authorized) setError("Confirm authorization before registering an asset."); return; }
     setSaving(true); setError(null);
-    try { await registerAsset(targetUrl, true); setTargetUrl(""); setAuthorized(false); load(); }
+    try { const asset = await registerAsset(targetUrl.trim(), true); const scan = await createScan(asset.normalized_url, true, asset.id); navigate(`/scans/${scan.id}`); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The asset could not be registered."); }
     finally { setSaving(false); }
   }
