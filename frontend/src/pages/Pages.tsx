@@ -122,6 +122,7 @@ export function FindingsPage() {
 }
 
 export function AssetsPage() {
+  const navigate = useNavigate();
   const pageSize = 20;
   const [overview, setOverview] = useState<import("../types").AssetOverview | null>(null);
   const [offset, setOffset] = useState(0);
