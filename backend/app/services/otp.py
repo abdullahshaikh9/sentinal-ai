@@ -46,6 +46,19 @@ class SmtpConfiguration:
     reason: str
 
 
+@dataclass(frozen=True)
+class GmailApiConfiguration:
+    """Validated, non-sensitive Gmail API configuration status."""
+
+    provider: str
+    client_id_present: bool
+    client_secret_present: bool
+    refresh_token_present: bool
+    sender_valid: bool
+    configured: bool
+    reason: str
+
+
 class OtpDeliveryError(RuntimeError):
     """Safe provider-independent delivery failure."""
 
@@ -114,8 +127,42 @@ def smtp_configuration_status(settings: Settings) -> SmtpConfiguration:
     )
 
 
-def log_smtp_configuration(settings: Settings) -> SmtpConfiguration:
+def gmail_api_configuration_status(settings: Settings) -> GmailApiConfiguration:
+    """Return Gmail API readiness without exposing credential values."""
+    provider = str(settings.email_provider or "").strip().lower()
+    client_id = str(settings.gmail_client_id or "").strip()
+    client_secret = str(settings.gmail_client_secret or "").strip()
+    refresh_token = str(settings.gmail_refresh_token or "").strip()
+    sender_email = parseaddr(str(settings.gmail_sender_email or "").strip())[1]
+    sender_valid = bool(_SMTP_ADDRESS_PATTERN.fullmatch(sender_email))
+    reason = "configured"
+    if provider != "gmail_api":
+        reason = "EMAIL_PROVIDER must be gmail_api"
+    elif not client_id:
+        reason = "GMAIL_CLIENT_ID is missing"
+    elif not client_secret:
+        reason = "GMAIL_CLIENT_SECRET is missing"
+    elif not refresh_token:
+        reason = "GMAIL_REFRESH_TOKEN is missing"
+    elif not sender_valid:
+        reason = "GMAIL_SENDER_EMAIL is invalid"
+    return GmailApiConfiguration(provider, bool(client_id), bool(client_secret), bool(refresh_token), sender_valid, reason == "configured", reason)
+
+
+def log_smtp_configuration(settings: Settings) -> SmtpConfiguration | GmailApiConfiguration:
     """Log only safe SMTP readiness metadata at application startup."""
+    if str(settings.email_provider or "").strip().lower() == "gmail_api":
+        status = gmail_api_configuration_status(settings)
+        delivery_logger.info(
+            "Email configuration provider=%s client_id_present=%s client_secret_present=%s refresh_token_present=%s sender_valid=%s validation=%s",
+            status.provider or "none",
+            status.client_id_present,
+            status.client_secret_present,
+            status.refresh_token_present,
+            status.sender_valid,
+            "ok" if status.configured else status.reason,
+        )
+        return status
     status = smtp_configuration_status(settings)
     delivery_logger.info(
         "SMTP configuration provider=%s host_present=%s port=%s username_present=%s password_present=%s sender_valid=%s tls_enabled=%s validation=%s",
@@ -133,10 +180,14 @@ def log_smtp_configuration(settings: Settings) -> SmtpConfiguration:
 
 def email_provider_configured(settings: Settings) -> bool:
     provider = str(settings.email_provider or "").strip().lower()
+    if provider == "gmail_api":
+        return gmail_api_configuration_status(settings).configured
     if provider == "resend":
         sender = parseaddr(str(settings.smtp_from or "").strip())[1]
         return bool(settings.resend_api_key and _SMTP_ADDRESS_PATTERN.fullmatch(sender))
-    return provider == "smtp" and smtp_configuration_status(settings).configured
+    if provider == "smtp":
+        return smtp_configuration_status(settings).configured
+    return False
 
 
 def sms_provider_configured(settings: Settings) -> bool:
@@ -157,10 +208,19 @@ def providers_configured(settings: Settings) -> bool:
 def configuration_message(settings: Settings) -> str:
     if not settings.otp_pepper:
         return "OTP verification is unavailable until OTP_PEPPER is configured."
+    provider = str(settings.email_provider or "").strip().lower()
     if not email_provider_configured(settings):
-        if str(settings.email_provider or "").strip().lower() == "resend":
+        if provider == "gmail_api":
+            gmail_status = gmail_api_configuration_status(settings)
+            return f"Email verification is unavailable until the Gmail API provider is configured: {gmail_status.reason}."
+        if provider == "resend":
             return "Email verification is unavailable until RESEND_API_KEY and a valid verified SMTP_FROM sender are configured."
-        return "Email verification is unavailable until the SMTP provider is configured."
+        if provider == "smtp":
+            smtp_status = smtp_configuration_status(settings)
+            if smtp_status.reason in {"SMTP_USERNAME and SMTP_PASSWORD must be provided together", "Gmail SMTP requires SMTP_USERNAME and SMTP_PASSWORD"}:
+                return "Email verification is unavailable until both SMTP_USERNAME and SMTP_PASSWORD are configured."
+            return "Email verification is unavailable until the SMTP provider is configured."
+        return "Email verification is unavailable because EMAIL_PROVIDER is unsupported."
     sms_provider = settings.sms_provider.lower()
     if sms_provider == "console" and settings.app_env.lower() != "development":
         return "SMS_PROVIDER=console is only permitted when APP_ENV=development."
@@ -247,48 +307,60 @@ def verify_password_reset_code(challenge: PasswordResetChallenge, code: str, set
     return hmac.compare_digest(challenge.code_hash, _hash_code(code, salt, settings.otp_pepper or ""))
 
 
-def _send_email_message(user: User, message: EmailMessage, settings: Settings) -> None:
-    provider = str(settings.email_provider or "").strip().lower()
-    if not email_provider_configured(settings):
-        raise RuntimeError("Email delivery provider is not configured.")
-    if provider == "resend":
-        sender = formataddr(("Sentinel AI", parseaddr(str(settings.smtp_from).strip())[1]))
-        response = httpx.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {settings.resend_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "from": sender,
-                "to": [user.email],
-                "subject": message["Subject"],
-                "text": message.get_content(),
-            },
-            timeout=settings.smtp_timeout_seconds,
-        )
-        response.raise_for_status()
-        try:
-            result = response.json()
-        except ValueError as exc:
-            raise RuntimeError("Email provider returned an unreadable response.") from exc
-        if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not result["id"]:
-            raise RuntimeError("Email provider did not confirm message acceptance.")
-        delivery_logger.info("Resend accepted email user_id=%s status_code=%s", user.id, response.status_code)
-        return
-
-    smtp_status = smtp_configuration_status(settings)
-    if not smtp_status.configured:
-        raise RuntimeError(f"Email verification provider is not configured: {smtp_status.reason}.")
-    with smtplib.SMTP(str(settings.smtp_host).strip(), settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
-        server.starttls(context=ssl.create_default_context())
-        if settings.smtp_username and settings.smtp_password:
-            password = "".join(settings.smtp_password.split()) if str(settings.smtp_host).strip().lower() in _GMAIL_SMTP_HOSTS else settings.smtp_password
-            server.login(str(settings.smtp_username).strip(), password)
-        server.send_message(message)
+def _build_gmail_message(user: User, code: str, settings: Settings, subject: str, intro: str) -> EmailMessage:
+    message = EmailMessage()
+    message["From"] = formataddr(("Sentinel AI", parseaddr(str(settings.gmail_sender_email or "").strip())[1]))
+    message["To"] = user.email
+    message["Subject"] = subject
+    message.set_content(
+        "Hello,\n\n"
+        f"{intro}: {code}\n\n"
+        f"This code expires in {settings.otp_ttl_minutes} minutes. Do not share it with anyone.\n\n"
+        "If you did not request this code, you can ignore this message.\n\n"
+        "— Sentinel AI Security Team"
+    )
+    return message
 
 
-def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
+def _deliver_gmail_api(message: EmailMessage, settings: Settings) -> None:
+    status = gmail_api_configuration_status(settings)
+    if not status.configured:
+        raise RuntimeError(f"Gmail API provider is not configured: {status.reason}.")
+    token_response = httpx.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": str(settings.gmail_client_id).strip(),
+            "client_secret": str(settings.gmail_client_secret).strip(),
+            "refresh_token": str(settings.gmail_refresh_token).strip(),
+            "grant_type": "refresh_token",
+        },
+        timeout=settings.gmail_timeout_seconds,
+    )
+    token_response.raise_for_status()
+    try:
+        token_payload = token_response.json()
+    except ValueError as exc:
+        raise RuntimeError("Gmail OAuth token response was invalid.") from exc
+    access_token = token_payload.get("access_token") if isinstance(token_payload, dict) else None
+    if not isinstance(access_token, str) or not access_token:
+        raise RuntimeError("Gmail OAuth token response did not contain an access token.")
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+    send_response = httpx.post(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+        json={"raw": raw},
+        timeout=settings.gmail_timeout_seconds,
+    )
+    send_response.raise_for_status()
+    try:
+        send_payload = send_response.json()
+    except ValueError as exc:
+        raise RuntimeError("Gmail API returned an invalid send response.") from exc
+    if not isinstance(send_payload, dict) or not isinstance(send_payload.get("id"), str) or not send_payload["id"]:
+        raise RuntimeError("Gmail API did not confirm message acceptance.")
+
+
+def _legacy_deliver_email_otp(user: User, code: str, settings: Settings) -> None:
     sender_email = parseaddr(str(settings.smtp_from or "").strip())[1]
     message = EmailMessage()
     message["From"] = formataddr(("Sentinel AI", sender_email))
@@ -304,9 +376,16 @@ def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
     _send_email_message(user, message, settings)
 
 
-def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> None:
+def _legacy_deliver_password_reset_otp(user: User, code: str, settings: Settings) -> None:
     """Send a reset-only OTP without logging its value or a reset capability."""
     sender_email = parseaddr(str(settings.smtp_from or "").strip())[1]
+    if str(settings.email_provider or "").strip().lower() == "gmail_api":
+        _deliver_gmail_api(_build_gmail_message(user, code, settings, "Your Sentinel AI Password Reset Code", "Your Sentinel AI password reset code is"), settings)
+        return
+    smtp_status = smtp_configuration_status(settings)
+    if not smtp_status.configured:
+        raise RuntimeError(f"Email delivery provider is not configured: {smtp_status.reason}.")
+    sender_email = parseaddr(str(settings.smtp_from).strip())[1]
     message = EmailMessage()
     message["From"] = formataddr(("Sentinel AI", sender_email))
     message["To"] = user.email
@@ -319,6 +398,66 @@ def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> Non
         "— Sentinel AI Security Team"
     )
     _send_email_message(user, message, settings)
+
+
+def _send_email_message(user: User, message: EmailMessage, settings: Settings) -> None:
+    provider = str(settings.email_provider or "").strip().lower()
+    if not email_provider_configured(settings):
+        raise RuntimeError("Email delivery provider is not configured.")
+    if provider == "gmail_api":
+        _deliver_gmail_api(message, settings)
+        return
+    if provider == "resend":
+        sender = formataddr(("Sentinel AI", parseaddr(str(settings.smtp_from or "").strip())[1]))
+        response = httpx.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {settings.resend_api_key}", "Content-Type": "application/json"},
+            json={"from": sender, "to": [user.email], "subject": message["Subject"], "text": message.get_content()},
+            timeout=settings.smtp_timeout_seconds,
+        )
+        response.raise_for_status()
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Email provider returned an unreadable response.") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str) or not result["id"]:
+            raise RuntimeError("Email provider did not confirm message acceptance.")
+        delivery_logger.info("Resend accepted email status_code=%s", response.status_code)
+        return
+    if provider != "smtp":
+        raise RuntimeError("Email delivery provider is not supported.")
+    with smtplib.SMTP(str(settings.smtp_host).strip(), settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
+        server.starttls(context=ssl.create_default_context())
+        if settings.smtp_username and settings.smtp_password:
+            password = "".join(settings.smtp_password.split()) if str(settings.smtp_host).strip().lower() in _GMAIL_SMTP_HOSTS else settings.smtp_password
+            server.login(str(settings.smtp_username).strip(), password)
+        server.send_message(message)
+
+
+def _build_email_message(user: User, code: str, settings: Settings, subject: str, intro: str) -> EmailMessage:
+    provider = str(settings.email_provider or "").strip().lower()
+    sender = settings.gmail_sender_email if provider == "gmail_api" else settings.smtp_from
+    message = EmailMessage()
+    message["From"] = formataddr(("Sentinel AI", parseaddr(str(sender or "").strip())[1]))
+    message["To"] = user.email
+    message["Subject"] = subject
+    message.set_content(
+        "Hello,\n\n"
+        f"{intro}: {code}\n\n"
+        f"This code expires in {settings.otp_ttl_minutes} minutes. Do not share it with anyone.\n\n"
+        "If you did not request this code, you can ignore this message.\n\n"
+        "— Sentinel AI Security Team"
+    )
+    return message
+
+
+def deliver_email_otp(user: User, code: str, settings: Settings) -> None:
+    _send_email_message(user, _build_email_message(user, code, settings, "Your Sentinel AI Verification Code", "Your verification code for Sentinel AI is"), settings)
+
+
+def deliver_password_reset_otp(user: User, code: str, settings: Settings) -> None:
+    """Send a reset-only OTP without logging its value or a reset capability."""
+    _send_email_message(user, _build_email_message(user, code, settings, "Your Sentinel AI Password Reset Code", "Your Sentinel AI password reset code is"), settings)
 
 
 def deliver_sms_otp(user: User, code: str, settings: Settings) -> None:

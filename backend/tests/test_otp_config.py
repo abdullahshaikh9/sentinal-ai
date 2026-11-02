@@ -7,7 +7,7 @@ import pytest
 from app.config import BACKEND_DIR, Settings
 from app.models import User
 from app.services import otp
-from app.services.otp import configuration_message, deliver, deliver_email_otp, deliver_sms_otp, email_provider_configured, providers_configured, smtp_configuration_status
+from app.services.otp import configuration_message, deliver, deliver_email_otp, deliver_password_reset_otp, deliver_sms_otp, email_provider_configured, gmail_api_configuration_status, providers_configured, smtp_configuration_status
 
 
 def _provider_environment(monkeypatch) -> None:
@@ -424,3 +424,123 @@ def test_successful_smtp_delivery_uses_tls_and_configured_timeout(monkeypatch) -
     assert captured["timeout"] == 9
     assert captured["tls_context"] is not None
     assert captured["recipient"] == "recipient@example.test"
+
+
+def test_gmail_api_delivery_refreshes_oauth_token_and_sends_raw_message_without_logging_secrets(monkeypatch, caplog) -> None:
+    calls = []
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+            self.status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.payload
+
+    def fake_post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response({"access_token": "private-access-token"} if url.endswith("/token") else {"id": "private-message-id"})
+
+    monkeypatch.setattr(otp.httpx, "post", fake_post)
+    settings = Settings(
+        _env_file=None,
+        email_provider="gmail_api",
+        gmail_client_id="private-client-id",
+        gmail_client_secret="private-client-secret",
+        gmail_refresh_token="private-refresh-token",
+        gmail_sender_email="sender@example.test",
+        gmail_timeout_seconds=8.5,
+        otp_pepper="private-pepper",
+        otp_ttl_minutes=13,
+    )
+
+    with caplog.at_level("INFO", logger="sentinel.otp.delivery"):
+        deliver_email_otp(User(id=30, email="recipient@example.test"), "583104", settings)
+
+    assert gmail_api_configuration_status(settings).configured
+    assert calls[0][0] == "https://oauth2.googleapis.com/token"
+    assert calls[0][1]["data"] == {
+        "client_id": "private-client-id",
+        "client_secret": "private-client-secret",
+        "refresh_token": "private-refresh-token",
+        "grant_type": "refresh_token",
+    }
+    assert calls[0][1]["timeout"] == 8.5
+    assert calls[1][0] == "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+    assert calls[1][1]["headers"]["Authorization"] == "Bearer private-access-token"
+    assert isinstance(calls[1][1]["json"]["raw"], str)
+    assert "private-client-secret" not in caplog.text
+    assert "private-refresh-token" not in caplog.text
+    assert "private-access-token" not in caplog.text
+    assert "583104" not in caplog.text
+
+
+def test_gmail_api_is_used_for_password_reset_and_does_not_fall_back_to_smtp(monkeypatch) -> None:
+    urls = []
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "access"} if urls[-1].endswith("/token") else {"id": "message"}
+
+    def fake_post(url, **kwargs):
+        urls.append(url)
+        return Response()
+
+    monkeypatch.setattr(otp.httpx, "post", fake_post)
+    settings = Settings(_env_file=None, email_provider="gmail_api", gmail_client_id="id", gmail_client_secret="secret", gmail_refresh_token="refresh", gmail_sender_email="sender@example.test", otp_pepper="pepper")
+    deliver_password_reset_otp(User(id=31, email="recipient@example.test"), "123456", settings)
+    assert urls == ["https://oauth2.googleapis.com/token", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"]
+
+
+def test_gmail_api_configuration_requires_all_credentials() -> None:
+    settings = Settings(_env_file=None, email_provider="gmail_api", gmail_client_id="id", gmail_client_secret="secret", gmail_sender_email="sender@example.test", otp_pepper="pepper")
+    status = gmail_api_configuration_status(settings)
+    assert not status.configured
+    assert status.reason == "GMAIL_REFRESH_TOKEN is missing"
+    assert not email_provider_configured(settings)
+
+
+def test_gmail_api_environment_variables_are_loaded_and_never_report_smtp_readiness_message(monkeypatch) -> None:
+    monkeypatch.setenv("EMAIL_PROVIDER", "gmail_api")
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "configured-client")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "configured-secret")
+    monkeypatch.setenv("GMAIL_REFRESH_TOKEN", "configured-refresh")
+    monkeypatch.setenv("GMAIL_SENDER_EMAIL", "sender@example.test")
+    monkeypatch.setenv("OTP_PEPPER", "pepper")
+    monkeypatch.setenv("SMS_PROVIDER", "console")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.email_provider == "gmail_api"
+    assert gmail_api_configuration_status(settings).configured
+    assert email_provider_configured(settings)
+    assert configuration_message(settings) == ""
+
+
+def test_gmail_api_configuration_never_reports_smtp_readiness_message() -> None:
+    settings = Settings(
+        _env_file=None,
+        email_provider="gmail_api",
+        gmail_client_id="id",
+        gmail_client_secret="secret",
+        gmail_refresh_token="refresh",
+        gmail_sender_email="sender@example.test",
+        otp_pepper="pepper",
+        sms_provider="console",
+    )
+
+    assert email_provider_configured(settings)
+    assert configuration_message(settings) == ""
+
+    missing = Settings(_env_file=None, email_provider="gmail_api", otp_pepper="pepper")
+    message = configuration_message(missing)
+    assert "Gmail API provider" in message
+    assert "SMTP provider" not in message

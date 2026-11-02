@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     smtp_from: str | None = None
     smtp_use_tls: bool = True
     smtp_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
+    gmail_client_id: str | None = None
+    gmail_client_secret: str | None = None
+    gmail_refresh_token: str | None = None
+    gmail_sender_email: str | None = None
+    gmail_timeout_seconds: float = Field(default=15.0, ge=1.0, le=60.0)
     sms_provider: str = "none"
     sms_account_sid: str | None = None
     sms_auth_token: str | None = None
