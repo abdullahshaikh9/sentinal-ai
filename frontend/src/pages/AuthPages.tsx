@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useState } from "react";
 import { CheckCircle2, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
-import { ApiError, resendOtp, verifyOtp, requestPasswordReset, verifyPasswordResetCode, resetPassword } from "../lib/api";
+import { ApiError, getCurrentUser, resendOtp, verifyOtp, requestPasswordReset, verifyPasswordResetCode, resetPassword } from "../lib/api";
 import type { LoginVerificationPending } from "../lib/api";
 import { useAuth } from "../auth/AuthContext";
 import type { User } from "../types";
@@ -61,7 +61,18 @@ export function LoginPage() {
     try {
       const result = await login(email, password);
       if ("verification_required" in result) { savePendingVerification(pendingFromLogin(result)); navigate("/verify", { replace: true }); }
-      else navigate("/dashboard", { replace: true });
+      else {
+        try {
+          await getCurrentUser();
+          navigate("/dashboard", { replace: true });
+        } catch (sessionError) {
+          if (sessionError instanceof ApiError && sessionError.status === 401) {
+            setError("Sign-in was accepted, but Safari did not retain your session cookie. Please use a browser that permits this site\u2019s cross-site cookies, or contact the site administrator to enable same-origin API hosting.");
+          } else {
+            setError(sessionError instanceof Error ? sessionError.message : "Could not verify your session. Please try again.");
+          }
+        }
+      }
     } catch (err) { setError(err instanceof ApiError ? err.message : "Unable to sign in."); } finally { setBusy(false); }
   };
   return <AuthShell><h2 className="mb-1 text-2xl font-semibold text-ink">Welcome back</h2><p className="mb-6 text-sm text-slate-500">Sign in to access your security workspace.</p><form onSubmit={submit} className="space-y-4"><div><label htmlFor="email" className="mb-1 block text-sm font-medium text-slate-700">Email</label><input id="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-emerald" autoComplete="email" /></div><div><PasswordField id="password" value={password} onChange={setPassword} /><div className="mt-1 flex justify-end"><Link to="/forgot-password" className="text-xs font-semibold text-emerald hover:underline">Forgot password?</Link></div></div>{error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}<button type="submit" disabled={busy} className="w-full rounded-lg bg-emerald px-4 py-2.5 font-semibold text-white disabled:opacity-60">{busy ? "Signing in…" : "Sign in"}</button></form><p className="mt-6 text-center text-sm text-slate-500">Need an account? <Link className="font-semibold text-emerald" to="/register">Register</Link></p></AuthShell>;
