@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, aliased
 from app.config import Settings, get_settings
 from app.db import DatabaseUnavailableError, check_database_connection, database_error_category, get_db
 from app.models import ActivityEvent, Asset, AuthSession, Finding, FindingRemediation, LoginAttempt, Notification, OtpChallenge, PasswordResetChallenge, RemediationChange, ReportMetadata, Scan, User, VerificationAttempt
-from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminDatabaseDiagnosticsRead, AdminDiagnosticChallengeRead, AdminDiagnosticExecuteRequest, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
+from app.schemas import ActivityEventRead, AdminActivityRead, AdminAssetRead, AdminAssetsRead, AdminDatabaseDiagnosticsRead, AdminDiagnosticChallengeRead, AdminDiagnosticExecuteRequest, AdminFindingRead, AdminFindingsRead, AdminHealthRead, AdminOverviewRead, AdminScanRead, AdminSessionRevokeRequest, AdminUserRead, AdminUsersRead, AdminUserStatusUpdate, AssetCreate, AssetOverviewRead, AssetRead, AssetSecurityRead, AssistantQuery, AssistantResponse, AssistantStatus, AuthResponse, ComparedFinding, DashboardAssetRead, DashboardOverviewRead, DashboardRiskPoint, DashboardScanRead, FindingDetailRead, FindingOverviewItem, FindingRead, HealthResponse, LoginRequest, LoginVerificationPendingResponse, NotificationRead, OtpResendRequest, OtpVerificationRequest, OtpVerificationResponse, PasswordChangeRequest, PasswordResetCompleteResponse, PasswordResetConfirmRequest, PasswordResetPendingResponse, PasswordResetRequest, PasswordResetVerifyRequest, PasswordResetVerifyResponse, RegistrationPendingResponse, RemediationChangeRead, RemediationRead, RemediationUpdate, ReportHistoryRead, ScanComparisonRead, ScanCreate, ScanDetail, ScanList, ScanRead, SearchResponse, SearchResultRead, SeverityChange, UserCreate, UserRead, VerificationAttemptRead, VerificationOverviewItem
 from app.services.activity import record_event
 from app.services.ai import AIProviderError, AIRateLimitError, MAX_CONTEXT_FINDINGS, assistant_http_error, ask_provider, build_context, check_rate_limit, configuration_message, provider_context_budget, provider_is_configured, provider_name
 from app.services.guidance import build_defensive_guidance
@@ -789,6 +789,10 @@ def admin_overview(db: Session = Depends(get_db), _admin: User = Depends(require
 
     scan_models = db.scalars(select(Scan).order_by(Scan.created_at.desc(), Scan.id.desc()).limit(10)).all()
     scan_ids = [scan.id for scan in scan_models]
+    owner_ids = {scan.owner_id for scan in scan_models if scan.owner_id is not None}
+    scan_owners = {
+        owner.id: owner for owner in db.scalars(select(User).where(User.id.in_(owner_ids))).all()
+    } if owner_ids else {}
     finding_counts = dict(
         db.execute(
             select(Finding.scan_id, func.count())
@@ -797,7 +801,13 @@ def admin_overview(db: Session = Depends(get_db), _admin: User = Depends(require
         ).all()
     ) if scan_ids else {}
     recent_scans = [
-        DashboardScanRead(**_scan_read(scan).model_dump(), findings_count=finding_counts.get(scan.id, 0))
+        AdminScanRead(
+            **_scan_read(scan).model_dump(),
+            findings_count=finding_counts.get(scan.id, 0),
+            owner_id=scan.owner_id,
+            owner_email=scan_owners[scan.owner_id].email if scan.owner_id in scan_owners else None,
+            owner_name=scan_owners[scan.owner_id].display_name if scan.owner_id in scan_owners else None,
+        )
         for scan in scan_models
     ]
     risk_rows = db.execute(
