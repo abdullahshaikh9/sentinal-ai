@@ -503,6 +503,12 @@ class AdminFindingsRead(BaseModel):
     offset: int
 
 
+class AdminScanRead(DashboardScanRead):
+    owner_id: int | None
+    owner_email: str | None
+    owner_name: str | None
+
+
 class AdminOverviewRead(BaseModel):
     users_total: int
     users_active: int
@@ -515,7 +521,7 @@ class AdminOverviewRead(BaseModel):
     reports_last_7_days: int
     auth_events_last_24_hours: int
     failed_login_counters_active: int | None
-    recent_scans: list[DashboardScanRead]
+    recent_scans: list[AdminScanRead]
     risk_history: list[DashboardRiskPoint]
     recent_activity: list[AdminActivityRead]
 
