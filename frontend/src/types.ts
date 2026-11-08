@@ -85,7 +85,7 @@ export type AdminOverview = {
   users_total: number; users_active: number; assets_total: number; assets_with_scans: number; scans_total: number;
   scans_by_status: Record<Scan["status"], number>; findings_by_severity: Record<Finding["severity"], number>;
   verification_outcomes: Record<string, number>; reports_last_7_days: number; auth_events_last_24_hours: number;
-  failed_login_counters_active: number | null; recent_scans: Array<Scan & { findings_count: number }>;
+  failed_login_counters_active: number | null; recent_scans: Array<Scan & { findings_count: number; owner_id: number | null; owner_email: string | null; owner_name: string | null }>;
   risk_history: Array<{ scan_id: number; recorded_at: string; risk_score: number }>; recent_activity: AdminActivity[];
 };
 export type AdminHealth = {
