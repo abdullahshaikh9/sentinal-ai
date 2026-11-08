@@ -115,6 +115,15 @@ export function AdminPage() {
     return rows.map((item, index) => `${(index / (rows.length - 1)) * 100},${90 - ((item.risk_score - min) / (max - min || 1)) * 80}`).join(" ");
   }, [overview]);
 
+  useEffect(() => {
+    if (!refreshing) return;
+    // Each section settles independently, so a single failed request must not hide other results.
+    if ([overview, health, users, assets, findings, audit].some(Boolean) || [overviewError, healthError, userError, assetError, findingError, auditError].some(Boolean)) {
+      setRefreshing(false);
+      setRefreshNotice("Refresh requested. Check each section for updated records or errors.");
+    }
+  }, [refreshing, overview, health, users, assets, findings, audit, overviewError, healthError, userError, assetError, findingError, auditError]);
+
   if (!user?.is_admin) return <section className="section-panel max-w-2xl" role="alert"><div className="flex items-start gap-3"><LockKeyhole className="mt-0.5 text-amber-600" size={21} /><div><h1 className="text-lg font-semibold text-ink">Administrator access required</h1><p className="mt-2 text-sm leading-6 text-slate-600">This account is not in the deployment administrator allowlist. Access is enforced by the backend for every admin API.</p></div></div></section>;
 
   async function performAction(event: FormEvent) {
@@ -147,14 +156,7 @@ export function AdminPage() {
     setOverviewError(null); setHealthError(null); setUserError(null); setAssetError(null); setFindingError(null); setAuditError(null);
     setRefreshKey((value) => value + 1);
   }
-  useEffect(() => {
-    if (!refreshing) return;
-    // Each section settles independently, so a single failed request must not hide other results.
-    if ([overview, health, users, assets, findings, audit].some(Boolean) || [overviewError, healthError, userError, assetError, findingError, auditError].some(Boolean)) {
-      setRefreshing(false);
-      setRefreshNotice("Refresh requested. Check each section for updated records or errors.");
-    }
-  }, [refreshing, overview, health, users, assets, findings, audit, overviewError, healthError, userError, assetError, findingError, auditError]);
+
 
   return <div className="space-y-6">
     <header className="flex flex-wrap items-start justify-between gap-4"><div><p className="eyebrow">Governance · restricted access</p><h1 className="page-title">Admin Control Center</h1><p className="page-subtitle">Operational records and access governance from the configured Sentinel database.</p><p className="mt-2 text-xs text-slate-500">Administrator access is deployment-managed. This console cannot grant administrator privileges.</p></div><button onClick={refreshRecords} disabled={refreshing} className="button-secondary"><RefreshCw size={15} className={refreshing ? "animate-spin" : ""} />{refreshing ? "Refreshing…" : "Refresh records"}</button></header>
